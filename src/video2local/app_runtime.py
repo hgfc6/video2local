@@ -7,6 +7,7 @@ from video2local.adapters.douyin import DouyinAdapter
 from video2local.browser import ChromeLaunchSpec, ChromeRemoteSession
 from video2local.config import AppSettings
 from video2local.downloader import YtDlpService
+from video2local.domain import SyncProgress
 from video2local.storage import VideoRepository
 from video2local.sync_engine import SyncEngine, SyncSummary
 
@@ -18,6 +19,7 @@ class AppRuntime:
     def __post_init__(self) -> None:
         self.adapter = DouyinAdapter()
         self.browser_session = ChromeRemoteSession()
+        self.last_progress: SyncProgress | None = None
         self.repository = VideoRepository(self.settings.paths.database_path)
         self.archive_manager = ArchiveManager(self.settings.paths.downloads_dir)
         self.downloader = YtDlpService()
@@ -43,20 +45,39 @@ class AppRuntime:
         page_url = self.browser_session.get_active_page_url()
         source = self.adapter.detect_source(page_url)
         if source is None:
+            if page_url.startswith("chrome://"):
+                raise RuntimeError("请先在专用 Chrome 中打开抖音收藏页或作者作品页")
             raise RuntimeError(f"Unsupported source page: {page_url}")
         return source
 
+    def validate_current_page(self) -> SourceDescriptor:
+        return self.get_current_source()
+
     def start_sync(self) -> SyncSummary:
         source = self.get_current_source()
-        html = self.browser_session.fetch_active_page_html()
-        candidate_urls = self.adapter.collect_candidate_urls(html)
-        items = [
-            self.downloader.probe_metadata(
+        candidate_urls: list[str] = []
+        seen_urls: set[str] = set()
+        for html in self.browser_session.fetch_active_page_html_snapshots():
+            for url in self.adapter.collect_candidate_urls(html):
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                candidate_urls.append(url)
+        items = []
+        seen_video_keys: set[tuple[str, str]] = set()
+        for url in candidate_urls:
+            metadata = self.downloader.probe_metadata(
                 url=url,
                 platform=source.platform,
                 source_type=source.source_type,
                 cookies_from_browser="chrome",
             )
-            for url in candidate_urls
-        ]
-        return self.sync_engine.sync_items(items)
+            video_key = (metadata.platform, metadata.video_id)
+            if video_key in seen_video_keys:
+                continue
+            seen_video_keys.add(video_key)
+            items.append(metadata)
+        return self.sync_engine.sync_items(items, progress_callback=self._store_progress)
+
+    def _store_progress(self, progress: SyncProgress) -> None:
+        self.last_progress = progress

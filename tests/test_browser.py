@@ -32,6 +32,16 @@ def test_detect_finds_chrome_on_path(tmp_path: Path) -> None:
     assert spec.remote_debugging_port == 9222
 
 
+def test_detect_falls_back_to_common_install_path(tmp_path: Path) -> None:
+    chrome_path = tmp_path / "chrome.exe"
+    chrome_path.write_text("", encoding="utf-8")
+    with patch("video2local.browser.shutil.which", return_value=None):
+        with patch("video2local.browser.COMMON_CHROME_PATHS", (chrome_path,)):
+            spec = ChromeLaunchSpec.detect(user_data_dir=tmp_path / "chrome-profile")
+
+    assert spec.executable_path == chrome_path
+
+
 def test_remote_session_returns_first_http_page_url() -> None:
     payload = json.dumps(
         [

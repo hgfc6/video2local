@@ -16,3 +16,15 @@ class VideoMetadata:
     author_name: str
     page_url: str
     download_url: str
+
+
+@dataclass(frozen=True)
+class SyncProgress:
+    discovered_count: int
+    processed_count: int
+    downloaded_count: int
+    skipped_count: int
+    failed_count: int
+    current_video_id: str
+    current_title: str | None
+    current_author_name: str
