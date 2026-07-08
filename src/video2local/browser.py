@@ -1,6 +1,8 @@
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import shutil
+from urllib.request import urlopen
 
 
 @dataclass(frozen=True)
@@ -28,3 +30,22 @@ class ChromeLaunchSpec:
             "--new-window",
             "about:blank",
         ]
+
+
+@dataclass(frozen=True)
+class ChromeRemoteSession:
+    host: str = "127.0.0.1"
+    port: int = 9222
+
+    def list_targets_url(self) -> str:
+        return f"http://{self.host}:{self.port}/json/list"
+
+    def get_active_page_url(self) -> str:
+        with urlopen(self.list_targets_url()) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+
+        for item in payload:
+            if item.get("type") == "page" and item.get("url"):
+                return item["url"]
+
+        raise RuntimeError("No active page target found in Chrome remote session")

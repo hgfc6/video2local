@@ -12,5 +12,9 @@ class MainController:
         self.status_text = "Chrome 已启动"
 
     def start_sync(self) -> None:
-        self.engine.start_sync()
-        self.status_text = "同步进行中"
+        try:
+            source = self.engine.start_sync()
+        except Exception as exc:
+            self.status_text = f"错误: {exc}"
+            return
+        self.status_text = f"已识别 {source.platform} / {source.source_type.value}"

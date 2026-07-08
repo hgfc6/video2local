@@ -10,16 +10,23 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Video2Local")
 
         self.status_label = QLabel(self.controller.status_text)
+        self.launch_button = QPushButton("启动 Chrome")
+        self.launch_button.clicked.connect(self.handle_launch)
         self.start_button = QPushButton("开始同步")
         self.start_button.clicked.connect(self.handle_start)
 
         layout = QVBoxLayout()
         layout.addWidget(self.status_label)
+        layout.addWidget(self.launch_button)
         layout.addWidget(self.start_button)
 
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
+
+    def handle_launch(self) -> None:
+        self.controller.launch_chrome()
+        self.status_label.setText(self.controller.status_text)
 
     def handle_start(self) -> None:
         self.controller.start_sync()
