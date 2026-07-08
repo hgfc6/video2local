@@ -1,8 +1,11 @@
 from dataclasses import dataclass
+import asyncio
 import json
 from pathlib import Path
 import shutil
 from urllib.request import urlopen
+
+from playwright.async_api import async_playwright
 
 
 @dataclass(frozen=True)
@@ -49,3 +52,18 @@ class ChromeRemoteSession:
                 return item["url"]
 
         raise RuntimeError("No active page target found in Chrome remote session")
+
+    async def _fetch_active_page_html_async(self) -> str:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.connect_over_cdp(f"http://{self.host}:{self.port}")
+            try:
+                for context in browser.contexts:
+                    for page in context.pages:
+                        if page.url and page.url != "about:blank":
+                            return await page.content()
+            finally:
+                await browser.close()
+        raise RuntimeError("No active browser page found for HTML capture")
+
+    def fetch_active_page_html(self) -> str:
+        return asyncio.run(self._fetch_active_page_html_async())

@@ -1,5 +1,9 @@
+import re
+
 from video2local.adapters.base import SourceDescriptor
 from video2local.domain import SourceType, VideoMetadata
+
+VIDEO_URL_RE = re.compile(r'https://www\.douyin\.com/video/\d+|/video/\d+')
 
 
 class DouyinAdapter:
@@ -21,6 +25,17 @@ class DouyinAdapter:
                 page_url=page_url,
             )
         return None
+
+    def collect_candidate_urls(self, html: str) -> list[str]:
+        seen: set[str] = set()
+        urls: list[str] = []
+        for match in VIDEO_URL_RE.findall(html):
+            url = match if match.startswith("http") else f"https://www.douyin.com{match}"
+            if url in seen:
+                continue
+            seen.add(url)
+            urls.append(url)
+        return urls
 
     def parse_candidate(self, raw_item: dict[str, str], source_type: SourceType) -> VideoMetadata:
         video_id = raw_item["video_id"]

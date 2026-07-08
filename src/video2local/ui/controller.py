@@ -13,8 +13,11 @@ class MainController:
 
     def start_sync(self) -> None:
         try:
-            source = self.engine.start_sync()
+            summary = self.engine.start_sync()
         except Exception as exc:
             self.status_text = f"错误: {exc}"
             return
-        self.status_text = f"已识别 {source.platform} / {source.source_type.value}"
+        self.status_text = (
+            f"同步完成: 下载 {summary.downloaded_count}，"
+            f"跳过 {summary.skipped_count}，失败 {summary.failed_count}"
+        )

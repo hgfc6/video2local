@@ -1,8 +1,9 @@
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import subprocess
 
-from video2local.domain import VideoMetadata
+from video2local.domain import SourceType, VideoMetadata
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,39 @@ class YtDlpService:
 
     def infer_extension(self, output_path: str) -> str:
         return Path(output_path).suffix.lstrip(".")
+
+    def probe_metadata(
+        self,
+        *,
+        url: str,
+        platform: str,
+        source_type: SourceType,
+        cookies_from_browser: str | None,
+    ) -> VideoMetadata:
+        command = [
+            self.binary_name,
+            "--ignore-config",
+            "--skip-download",
+            "--dump-single-json",
+        ]
+        if cookies_from_browser:
+            command.extend(["--cookies-from-browser", cookies_from_browser])
+        command.append(url)
+        completed = subprocess.run(command, capture_output=True, text=True, check=True)
+        payload = json.loads(completed.stdout)
+        video_id = str(payload["id"])
+        title = payload.get("title") or video_id
+        author_name = payload.get("uploader") or payload.get("channel") or payload.get("creator") or "unknown"
+        page_url = payload.get("webpage_url") or url
+        return VideoMetadata(
+            platform=platform,
+            source_type=source_type,
+            video_id=video_id,
+            title=title,
+            author_name=author_name,
+            page_url=page_url,
+            download_url=page_url,
+        )
 
     def download(self, metadata: VideoMetadata, target_dir: Path) -> tuple[str, str]:
         request = self.build_request(

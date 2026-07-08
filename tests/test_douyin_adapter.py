@@ -35,3 +35,19 @@ def test_parse_candidate_normalizes_missing_title_to_video_id() -> None:
     assert metadata.video_id == "735001"
     assert metadata.title == "735001"
     assert metadata.author_name == "张三"
+
+
+def test_collect_candidate_urls_returns_unique_absolute_video_urls() -> None:
+    adapter = DouyinAdapter()
+    html = """
+    <a href="/video/735001">one</a>
+    <a href="https://www.douyin.com/video/735002">two</a>
+    <a href="/video/735001">duplicate</a>
+    """
+
+    urls = adapter.collect_candidate_urls(html)
+
+    assert urls == [
+        "https://www.douyin.com/video/735001",
+        "https://www.douyin.com/video/735002",
+    ]

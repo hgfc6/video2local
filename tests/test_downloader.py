@@ -1,6 +1,7 @@
 from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
+import json
 
 from video2local.domain import SourceType, VideoMetadata
 from video2local.downloader import DownloadRequest, YtDlpService
@@ -106,3 +107,31 @@ def test_download_returns_extension_and_output_path_from_completed_process(tmp_p
     assert file_ext == "mp4"
     assert local_path == output_path
     assert run_mock.called is True
+
+
+def test_probe_metadata_returns_video_metadata_from_yt_dlp_json() -> None:
+    service = YtDlpService(binary_name="yt-dlp")
+    payload = json.dumps(
+        {
+            "id": "735005",
+            "title": "夜景",
+            "uploader": "小明",
+            "webpage_url": "https://www.douyin.com/video/735005",
+        }
+    )
+    completed = CompletedProcess(args=["yt-dlp"], returncode=0, stdout=payload, stderr="")
+
+    with patch("video2local.downloader.subprocess.run", return_value=completed):
+        metadata = service.probe_metadata(
+            url="https://www.douyin.com/video/735005",
+            platform="douyin",
+            source_type=SourceType.FAVORITES,
+            cookies_from_browser="chrome",
+        )
+
+    assert metadata.platform == "douyin"
+    assert metadata.source_type == SourceType.FAVORITES
+    assert metadata.video_id == "735005"
+    assert metadata.title == "夜景"
+    assert metadata.author_name == "小明"
+    assert metadata.page_url == "https://www.douyin.com/video/735005"

@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 
-from video2local.adapters.base import SourceDescriptor
-from video2local.domain import SourceType
+from video2local.sync_engine import SyncSummary
 from video2local.ui.controller import MainController
 
 
@@ -13,13 +12,9 @@ class FakeEngine:
     def launch_chrome(self) -> None:
         self.launched = True
 
-    def start_sync(self) -> SourceDescriptor:
+    def start_sync(self) -> SyncSummary:
         self.started = True
-        return SourceDescriptor(
-            platform="douyin",
-            source_type=SourceType.FAVORITES,
-            page_url="https://www.douyin.com/user/self?showTab=favorite_collection",
-        )
+        return SyncSummary(downloaded_count=2, skipped_count=1, failed_count=0)
 
 
 def test_main_controller_updates_status_when_sync_starts() -> None:
@@ -29,7 +24,7 @@ def test_main_controller_updates_status_when_sync_starts() -> None:
     controller.start_sync()
 
     assert engine.started is True
-    assert controller.status_text == "已识别 douyin / favorites"
+    assert controller.status_text == "同步完成: 下载 2，跳过 1，失败 0"
 
 
 def test_main_controller_updates_status_when_chrome_launches() -> None:
