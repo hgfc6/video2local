@@ -10,25 +10,46 @@ from video2local.sync_engine import SyncEngine
 class FakeRepository:
     existing: set[tuple[str, str]]
     saved: list[tuple[str, str]]
+    skipped: list[str] | None = None
+    failed: list[tuple[str, str]] | None = None
 
     def has_downloaded_video(self, platform: str, video_id: str) -> bool:
         return (platform, video_id) in self.existing
 
-    def upsert_downloaded_video(self, metadata: VideoMetadata, local_path: str, file_ext: str) -> None:
+    def upsert_downloaded_video(
+        self,
+        metadata: VideoMetadata,
+        local_path: str,
+        file_ext: str,
+        file_size: int | None = None,
+    ) -> None:
         self.saved.append((metadata.video_id, local_path))
+
+    def record_skipped_video(self, metadata: VideoMetadata) -> None:
+        if self.skipped is not None:
+            self.skipped.append(metadata.video_id)
+
+    def record_failed_video(self, metadata: VideoMetadata, error_message: str) -> None:
+        if self.failed is not None:
+            self.failed.append((metadata.video_id, error_message))
 
 
 @dataclass
 class FakeDownloader:
     downloads: list[str]
 
-    def download(self, metadata: VideoMetadata, target_dir: Path) -> tuple[str, str]:
+    def download(
+        self,
+        metadata: VideoMetadata,
+        target_dir: Path,
+        cookies_file: Path | None = None,
+    ) -> tuple[str, str]:
         self.downloads.append(metadata.video_id)
         return ("mp4", str(target_dir / f"{metadata.title} [{metadata.video_id}].mp4"))
 
 
 def test_sync_engine_skips_existing_video_and_downloads_new_one(tmp_path: Path) -> None:
-    repo = FakeRepository(existing={("douyin", "735001")}, saved=[])
+    repo = FakeRepository(existing={("douyin", "735001")}, saved=[], skipped=[], failed=[])
     downloader = FakeDownloader(downloads=[])
     archive = ArchiveManager(download_root=tmp_path)
     engine = SyncEngine(repository=repo, downloader=downloader, archive_manager=archive)
@@ -60,10 +81,11 @@ def test_sync_engine_skips_existing_video_and_downloads_new_one(tmp_path: Path) 
     assert summary.downloaded_count == 1
     assert downloader.downloads == ["735002"]
     assert repo.saved[0][0] == "735002"
+    assert repo.skipped == ["735001"]
 
 
 def test_sync_engine_reports_progress_for_each_processed_item(tmp_path: Path) -> None:
-    repo = FakeRepository(existing={("douyin", "735001")}, saved=[])
+    repo = FakeRepository(existing={("douyin", "735001")}, saved=[], skipped=[], failed=[])
     downloader = FakeDownloader(downloads=[])
     archive = ArchiveManager(download_root=tmp_path)
     engine = SyncEngine(repository=repo, downloader=downloader, archive_manager=archive)
@@ -98,3 +120,105 @@ def test_sync_engine_reports_progress_for_each_processed_item(tmp_path: Path) ->
     assert events[1].processed_count == 2
     assert events[1].downloaded_count == 1
     assert events[1].current_video_id == "735002"
+
+
+def test_sync_engine_stops_after_current_item_when_requested(tmp_path: Path) -> None:
+    @dataclass
+    class StoppableDownloader:
+        downloads: list[str]
+        engine: SyncEngine | None = None
+
+        def download(
+            self,
+            metadata: VideoMetadata,
+            target_dir: Path,
+            cookies_file: Path | None = None,
+        ) -> tuple[str, str]:
+            self.downloads.append(metadata.video_id)
+            if self.engine is not None:
+                self.engine.request_stop()
+            return ("mp4", str(target_dir / f"{metadata.title} [{metadata.video_id}].mp4"))
+
+    repo = FakeRepository(existing=set(), saved=[], skipped=[], failed=[])
+    downloader = StoppableDownloader(downloads=[])
+    archive = ArchiveManager(download_root=tmp_path)
+    engine = SyncEngine(repository=repo, downloader=downloader, archive_manager=archive)
+    downloader.engine = engine
+    videos = [
+        VideoMetadata(
+            platform="douyin",
+            source_type=SourceType.FAVORITES,
+            video_id="735010",
+            title="第一条",
+            author_name="张三",
+            page_url="https://www.douyin.com/video/735010",
+            download_url="https://www.douyin.com/video/735010",
+        ),
+        VideoMetadata(
+            platform="douyin",
+            source_type=SourceType.FAVORITES,
+            video_id="735011",
+            title="第二条",
+            author_name="张三",
+            page_url="https://www.douyin.com/video/735011",
+            download_url="https://www.douyin.com/video/735011",
+        ),
+    ]
+
+    summary = engine.sync_items(videos)
+
+    assert summary.status == "stopped"
+    assert summary.discovered_count == 2
+    assert summary.downloaded_count == 1
+    assert summary.skipped_count == 0
+    assert summary.failed_count == 0
+    assert downloader.downloads == ["735010"]
+
+
+def test_sync_engine_records_failed_video_and_continues(tmp_path: Path) -> None:
+    @dataclass
+    class FlakyDownloader:
+        downloads: list[str]
+
+        def download(
+            self,
+            metadata: VideoMetadata,
+            target_dir: Path,
+            cookies_file: Path | None = None,
+        ) -> tuple[str, str]:
+            self.downloads.append(metadata.video_id)
+            if metadata.video_id == "735020":
+                raise RuntimeError("network down")
+            return ("mp4", str(target_dir / f"{metadata.title} [{metadata.video_id}].mp4"))
+
+    repo = FakeRepository(existing=set(), saved=[], skipped=[], failed=[])
+    downloader = FlakyDownloader(downloads=[])
+    archive = ArchiveManager(download_root=tmp_path)
+    engine = SyncEngine(repository=repo, downloader=downloader, archive_manager=archive)
+    videos = [
+        VideoMetadata(
+            platform="douyin",
+            source_type=SourceType.FAVORITES,
+            video_id="735020",
+            title="失败条目",
+            author_name="张三",
+            page_url="https://www.douyin.com/video/735020",
+            download_url="https://www.douyin.com/video/735020",
+        ),
+        VideoMetadata(
+            platform="douyin",
+            source_type=SourceType.FAVORITES,
+            video_id="735021",
+            title="成功条目",
+            author_name="张三",
+            page_url="https://www.douyin.com/video/735021",
+            download_url="https://www.douyin.com/video/735021",
+        ),
+    ]
+
+    summary = engine.sync_items(videos)
+
+    assert summary.failed_count == 1
+    assert summary.downloaded_count == 1
+    assert repo.failed == [("735020", "network down")]
+    assert repo.saved[0][0] == "735021"

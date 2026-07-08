@@ -145,12 +145,14 @@ def test_repository_persists_downloaded_video_and_returns_it(tmp_path: Path) -> 
         author_name="张三",
         page_url="https://www.douyin.com/video/735001",
         download_url="https://cdn.example.com/735001",
+        duration_seconds=88,
     )
 
     repo.upsert_downloaded_video(
         metadata=metadata,
         local_path="downloads/douyin/张三/晚霞散步 [735001].mp4",
         file_ext="mp4",
+        file_size=1024,
     )
 
     row = repo.get_video("douyin", "735001")
@@ -165,6 +167,9 @@ def test_repository_persists_downloaded_video_and_returns_it(tmp_path: Path) -> 
     assert row["download_url"] == "https://cdn.example.com/735001"
     assert row["local_path"] == "downloads/douyin/张三/晚霞散步 [735001].mp4"
     assert row["file_ext"] == "mp4"
+    assert row["file_size"] == 1024
+    assert row["duration_seconds"] == 88
+    assert row["downloaded_at"] is not None
     assert row["download_status"] == "downloaded"
 
 
@@ -250,3 +255,120 @@ def test_repository_upsert_updates_existing_video_in_place(tmp_path: Path) -> No
 
     assert count is not None
     assert count[0] == 1
+
+
+def test_repository_records_and_finishes_sync_run(tmp_path: Path) -> None:
+    repo = VideoRepository(tmp_path / "video2local.db")
+    repo.initialize()
+
+    run_id = repo.create_sync_run(platform="douyin")
+    repo.finish_sync_run(
+        run_id=run_id,
+        status="completed",
+        discovered_count=5,
+        downloaded_count=3,
+        skipped_count=1,
+        failed_count=1,
+    )
+
+    row = repo.get_latest_sync_run()
+
+    assert row is not None
+    assert row["id"] == run_id
+    assert row["platform"] == "douyin"
+    assert row["status"] == "completed"
+    assert row["discovered_count"] == 5
+    assert row["downloaded_count"] == 3
+    assert row["skipped_count"] == 1
+    assert row["failed_count"] == 1
+    assert row["started_at"] is not None
+    assert row["ended_at"] is not None
+
+
+def test_repository_records_skipped_and_failed_video_statuses(tmp_path: Path) -> None:
+    repo = VideoRepository(tmp_path / "video2local.db")
+    repo.initialize()
+    skipped = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="skip-1",
+        title="已存在视频",
+        author_name="张三",
+        page_url="https://www.douyin.com/video/skip-1",
+        download_url="https://cdn.example.com/skip-1",
+    )
+    failed = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.AUTHOR_VIDEOS,
+        video_id="fail-1",
+        title="失败视频",
+        author_name="李四",
+        page_url="https://www.douyin.com/video/fail-1",
+        download_url="https://cdn.example.com/fail-1",
+    )
+
+    repo.record_skipped_video(skipped)
+    repo.record_failed_video(failed, error_message="yt-dlp failed")
+
+    skipped_row = repo.get_video("douyin", "skip-1")
+    failed_row = repo.get_video("douyin", "fail-1")
+
+    assert skipped_row is not None
+    assert skipped_row["download_status"] == "skipped_existing"
+    assert skipped_row["error_message"] is None
+    assert failed_row is not None
+    assert failed_row["download_status"] == "failed"
+    assert failed_row["error_message"] == "yt-dlp failed"
+
+
+def test_repository_initialize_migrates_legacy_videos_table_with_missing_columns(tmp_path: Path) -> None:
+    database_path = tmp_path / "video2local.db"
+    with sqlite3.connect(database_path) as conn:
+        conn.execute(
+            """
+            create table videos (
+                id integer primary key,
+                platform text not null,
+                video_id text not null,
+                source_type text not null,
+                author_name text not null,
+                title text,
+                page_url text not null,
+                download_url text not null,
+                local_path text,
+                file_ext text,
+                download_status text not null,
+                created_at text not null default current_timestamp,
+                updated_at text not null default current_timestamp,
+                unique(platform, video_id)
+            )
+            """
+        )
+
+    repo = VideoRepository(database_path)
+    repo.initialize()
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="legacy-1",
+        title="旧库迁移验证",
+        author_name="张三",
+        page_url="https://www.douyin.com/video/legacy-1",
+        download_url="https://cdn.example.com/legacy-1",
+        duration_seconds=12,
+    )
+
+    repo.upsert_downloaded_video(
+        metadata=metadata,
+        local_path="downloads/douyin/张三/旧库迁移验证 [legacy-1].mp4",
+        file_ext="mp4",
+        file_size=2048,
+    )
+
+    row = repo.get_video("douyin", "legacy-1")
+
+    assert row is not None
+    assert row["downloaded_at"] is not None
+    assert row["file_size"] == 2048
+    assert row["duration_seconds"] == 12
+    assert row["error_message"] is None

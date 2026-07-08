@@ -7,6 +7,13 @@ class SourceType(StrEnum):
     AUTHOR_VIDEOS = "author_videos"
 
 
+class SyncRunStatus(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    STOPPED = "stopped"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class VideoMetadata:
     platform: str
@@ -16,6 +23,7 @@ class VideoMetadata:
     author_name: str
     page_url: str
     download_url: str
+    duration_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -28,3 +36,9 @@ class SyncProgress:
     current_video_id: str
     current_title: str | None
     current_author_name: str
+
+
+@dataclass(frozen=True)
+class SampleDownloadResult:
+    metadata: VideoMetadata
+    local_path: str
