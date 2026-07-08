@@ -1,169 +1,169 @@
-# Video2Local Design
+# Video2Local 设计文档
 
-## Goal
+## 目标
 
-Build a desktop application that launches a dedicated Chrome profile, lets the user log into a video platform manually, reads the user's favorites page, downloads videos to the local machine at the highest available quality, and archives them automatically by platform and author.
+构建一个桌面应用程序：由程序启动一个专用 Chrome 配置目录，你手动登录视频平台并打开收藏页，程序读取收藏列表，把视频以当前可获取到的最高清晰度下载到本地，并按平台和作者自动归档。
 
-The first supported platform is Douyin. The design must keep the platform-specific logic isolated so later versions can add Bilibili, Kuaishou, and YouTube without rewriting the core app.
+第一版只支持抖音，但整体设计必须把平台相关逻辑隔离开，后续可以在不重写核心系统的前提下扩展到哔哩哔哩、快手、YouTube 等平台。
 
-## Confirmed Product Decisions
+## 已确认的产品决策
 
-- Delivery form: desktop application
-- Browser: dedicated Chrome window managed by the app
-- First platform: Douyin favorites page
-- Download engine: `yt-dlp`
-- Quality target: highest available quality exposed by the source and `yt-dlp`
-- Archive layout: `platform/author_name/video_title [video_id].ext`
-- Deduplication key: `platform + video_id`
-- Persistent index: SQLite
-- Duplicate behavior: skip already-downloaded videos during later sync runs
+- 交付形态：桌面应用
+- 浏览器：由程序管理的专用 Chrome 窗口
+- 首个平台：抖音收藏页
+- 下载内核：`yt-dlp`
+- 清晰度目标：下载当前来源和 `yt-dlp` 能获取到的最高画质
+- 归档目录：`platform/author_name/video_title [video_id].ext`
+- 去重键：`platform + video_id`
+- 持久化索引：SQLite
+- 重复项处理：后续同步时跳过已下载视频
 
-## Non-Goals For Version 1
+## 第一版非目标
 
-- No attempt to attach to arbitrary existing Chrome windows
-- No browser extension
-- No fully automated login flow
-- No support for bulk export from multiple platforms in the first milestone
-- No advanced media processing such as transcoding, subtitle extraction, or thumbnail archiving unless required by `yt-dlp` output handling
+- 不支持接管任意已经打开的 Chrome 窗口
+- 不做浏览器扩展
+- 不做全自动登录流程
+- 第一阶段不支持多平台同时批量导出
+- 不做转码、字幕抽取、封面归档等高级媒体处理，除非 `yt-dlp` 的输出处理必须涉及
 
-## High-Level Architecture
+## 总体架构
 
-The application is divided into six focused modules.
+应用分为六个职责清晰的模块。
 
-### 1. Desktop UI
+### 1. 桌面界面
 
-The UI owns user-triggered actions and runtime visibility.
+界面负责承接用户操作，并实时展示运行状态。
 
-Primary actions:
+主要操作：
 
-- Launch dedicated Chrome
-- Validate current page
-- Start sync
-- Stop sync
-- Open download root
-- View recent logs or last sync summary
+- 启动专用 Chrome
+- 校验当前页面
+- 开始同步
+- 停止同步
+- 打开下载目录
+- 查看最近日志或最近一次同步摘要
 
-Runtime feedback:
+运行时反馈：
 
-- Current platform
-- Current author
-- Current video title
-- Current operation stage
-- Progress counters: discovered, downloaded, skipped, failed
-- Error messages for the active item
+- 当前平台
+- 当前作者
+- 当前视频标题
+- 当前执行阶段
+- 进度计数：已发现、已下载、已跳过、已失败
+- 当前项目的错误信息
 
-### 2. Chrome Session Manager
+### 2. Chrome 会话管理器
 
-This module starts Chrome with an application-owned user data directory. The directory persists between runs so the user logs in once and reuses the session later.
+该模块负责以应用专用的用户数据目录启动 Chrome。该目录会长期保留，因此你只需要登录一次，后续就可以反复复用该会话。
 
-Responsibilities:
+职责：
 
-- Locate the Chrome executable
-- Start Chrome with a dedicated profile path
-- Reconnect automation to that Chrome instance
-- Expose the active page context to site adapters
+- 定位 Chrome 可执行文件
+- 使用专用 profile 路径启动 Chrome
+- 让自动化层重新连接到该 Chrome 实例
+- 向站点适配器暴露当前页面上下文
 
-The app does not need to control the user's normal Chrome profile. Isolation is deliberate because it is more stable and easier to support.
+程序不需要控制你平时使用的默认 Chrome 配置。隔离专用目录是有意为之，因为它更稳定，也更容易支持。
 
-### 3. Site Adapter Layer
+### 3. 站点适配器层
 
-Each platform implements a common interface and hides platform-specific page structure.
+每个平台实现同一套接口，把平台页面结构差异封装在内部。
 
-Initial interface:
+初始接口：
 
 - `can_handle_page(url: str) -> bool`
 - `collect_video_candidates(page) -> Iterable[VideoCandidate]`
 - `resolve_video_metadata(page, candidate) -> VideoMetadata`
 - `normalize_author_name(raw_name: str) -> str`
 
-Version 1 provides only `DouyinAdapter`.
+第一版只提供 `DouyinAdapter`。
 
-This layer is responsible for:
+该层负责：
 
-- Recognizing supported favorites pages
-- Scrolling and collecting candidate video entries
-- Opening or resolving the actual video page when needed
-- Extracting stable metadata required by the rest of the app
+- 识别当前页面是否为受支持的收藏页
+- 滚动页面并收集候选视频
+- 在需要时打开或解析实际视频页
+- 抽取核心元数据，供系统其他部分使用
 
-The rest of the system must not depend on Douyin-specific selectors or URL formats.
+系统其他层不能依赖任何抖音专用的选择器或 URL 规则。
 
-### 4. Download Service
+### 4. 下载服务
 
-This module wraps `yt-dlp` rather than embedding site-specific download logic directly into the application.
+该模块对 `yt-dlp` 做统一封装，而不是把站点专用下载逻辑直接写进应用里。
 
-Responsibilities:
+职责：
 
-- Build the `yt-dlp` command
-- Request the highest available quality
-- Capture stdout, stderr, exit code, and output file path
-- Report structured download results back to the sync engine
+- 组装 `yt-dlp` 命令
+- 请求最高可获取画质
+- 捕获 stdout、stderr、退出码和输出文件路径
+- 把结构化下载结果回传给同步引擎
 
-The app should treat `yt-dlp` as the download authority. If the platform exposes a best-available quality lower than the theoretical original, the app still considers that successful, because the contract is "best available through the chosen tool and current session."
+应用把 `yt-dlp` 视为下载事实来源。如果平台实际只能暴露出“当前可获取的最高画质”，即便低于理论原画，程序仍然视为成功，因为第一版的契约是“在当前登录态和当前工具能力下拿到最佳可用版本”。
 
-### 5. Archive Manager
+### 5. 归档管理器
 
-This module converts metadata into deterministic local paths and keeps filenames safe on Windows.
+该模块根据视频元数据生成确定性的本地路径，并保证文件名在 Windows 下安全可用。
 
-Rules:
+规则：
 
-- Root directory is user-configurable
-- Platform folder is normalized, for example `douyin`
-- Author folder is normalized from platform metadata
-- Final file name format is `title [video_id].ext`
-- Invalid filesystem characters are removed or replaced
-- If the title is empty, fallback to `[video_id].ext`
+- 根目录可配置
+- 平台目录统一规范化，例如 `douyin`
+- 作者目录由平台元数据规范化后生成
+- 最终文件名格式为 `title [video_id].ext`
+- 非法文件名字符会被移除或替换
+- 如果标题为空，则回退为 `[video_id].ext`
 
-The video ID remains in the filename even though SQLite stores it separately. This prevents human-facing ambiguity and avoids collisions between videos with the same title.
+即使 SQLite 中也会保存视频 ID，文件名里仍然保留 `[video_id]`，这样更利于人工识别，也能避免同标题覆盖。
 
-### 6. Sync Engine
+### 6. 同步引擎
 
-This module orchestrates end-to-end task execution.
+该模块负责串联整个同步流程。
 
-Workflow per item:
+单个视频的处理流程：
 
-1. Candidate discovered by the site adapter
-2. Metadata resolved, including stable `video_id`
-3. SQLite checked for existing `(platform, video_id)`
-4. If already downloaded, mark as skipped
-5. Otherwise download via `yt-dlp`
-6. Persist or finalize the file into the archive path
-7. Record result in SQLite
-8. Emit progress updates to the UI
+1. 站点适配器发现候选视频
+2. 解析元数据，拿到稳定 `video_id`
+3. 查询 SQLite 中是否已有 `(platform, video_id)`
+4. 如果已经下载过，则标记为跳过
+5. 否则调用 `yt-dlp` 下载
+6. 将文件直接写入或整理到归档路径
+7. 将结果写入 SQLite
+8. 把进度推送到界面
 
-The sync engine also owns cancellation, per-run statistics, and safe continuation after interruption.
+同步引擎还负责取消、中断统计，以及中途停止后的安全续跑能力。
 
-## Core Data Model
+## 核心数据模型
 
-Two persistent tables are required.
+至少需要两张持久化数据表。
 
 ### `videos`
 
-This is the deduplication and media inventory table.
+这是媒体清单和去重的主表。
 
-Required fields:
+必需字段：
 
-- `id` integer primary key
-- `platform` text not null
-- `video_id` text not null
-- `author_name` text not null
-- `title` text null
-- `source_url` text not null
-- `page_url` text null
-- `local_path` text null
-- `file_ext` text null
-- `download_status` text not null
-- `downloaded_at` datetime null
-- `file_size` integer null
-- `duration_seconds` integer null
-- `error_message` text null
-- `created_at` datetime not null
-- `updated_at` datetime not null
+- `id`：整数主键
+- `platform`：文本，非空
+- `video_id`：文本，非空
+- `author_name`：文本，非空
+- `title`：文本，可空
+- `source_url`：文本，非空
+- `page_url`：文本，可空
+- `local_path`：文本，可空
+- `file_ext`：文本，可空
+- `download_status`：文本，非空
+- `downloaded_at`：时间，可空
+- `file_size`：整数，可空
+- `duration_seconds`：整数，可空
+- `error_message`：文本，可空
+- `created_at`：时间，非空
+- `updated_at`：时间，非空
 
-Unique constraint:
+唯一约束：
 
 - `(platform, video_id)`
 
-Recommended status values:
+建议状态值：
 
 - `pending`
 - `downloaded`
@@ -172,204 +172,204 @@ Recommended status values:
 
 ### `sync_runs`
 
-This table records one execution of a sync job.
+该表记录一次完整同步任务。
 
-Required fields:
+必需字段：
 
-- `id` integer primary key
-- `platform` text not null
-- `started_at` datetime not null
-- `ended_at` datetime null
-- `status` text not null
-- `discovered_count` integer not null default 0
-- `downloaded_count` integer not null default 0
-- `skipped_count` integer not null default 0
-- `failed_count` integer not null default 0
-- `error_message` text null
+- `id`：整数主键
+- `platform`：文本，非空
+- `started_at`：时间，非空
+- `ended_at`：时间，可空
+- `status`：文本，非空
+- `discovered_count`：整数，非空，默认 0
+- `downloaded_count`：整数，非空，默认 0
+- `skipped_count`：整数，非空，默认 0
+- `failed_count`：整数，非空，默认 0
+- `error_message`：文本，可空
 
-Recommended run status values:
+建议任务状态值：
 
 - `running`
 - `completed`
 - `stopped`
 - `failed`
 
-## Sync Flow
+## 同步流程
 
-### Step 1. Launch dedicated Chrome
+### 第一步：启动专用 Chrome
 
-The user clicks a UI action that starts Chrome with the app-managed profile directory.
+你在界面点击启动按钮，程序使用受管理的 profile 目录启动 Chrome。
 
-### Step 2. Manual login and page selection
+### 第二步：手动登录并打开收藏页
 
-The user logs into Douyin inside that Chrome window and opens the favorites page manually. This avoids brittle login automation and matches the user's real workflow.
+你在该 Chrome 窗口中手动登录抖音并打开收藏页。这样可以避开脆弱的自动登录逻辑，也最符合你的真实使用方式。
 
-### Step 3. Page validation
+### 第三步：校验页面
 
-Before sync begins, the active adapter checks whether the current page is a supported favorites page. If not, the UI blocks the run and shows a clear error.
+在开始同步之前，当前适配器先判断当前页是否为受支持的收藏页。如果不是，界面阻止任务开始，并给出明确提示。
 
-### Step 4. Incremental candidate discovery
+### 第四步：增量发现候选视频
 
-The adapter scrolls the page and collects candidate videos progressively rather than requiring the entire favorites list up front. This reduces memory usage and lowers the risk from unstable infinite-scroll behavior.
+适配器采用“边滚动边采集”的方式逐步收集候选视频，而不是要求先把整页收藏一次性全部解析出来。这样更省内存，也能降低无限滚动页面不稳定带来的风险。
 
-### Step 5. Metadata resolution
+### 第五步：解析元数据
 
-For each candidate, the adapter resolves:
+对每个候选视频，适配器至少要解析出：
 
-- Platform
-- Stable video ID
-- Title
-- Author name
-- Source page URL
-- Downloadable page URL or media URL usable by `yt-dlp`
+- 平台名
+- 稳定视频 ID
+- 标题
+- 作者名
+- 来源页面 URL
+- 可交给 `yt-dlp` 的下载页面 URL 或媒体目标
 
-The sync engine must not decide deduplication before the stable video ID is available.
+同步引擎只有在拿到稳定 `video_id` 后，才能做真正的去重判断。
 
-### Step 6. Deduplication
+### 第六步：去重
 
-The sync engine queries SQLite using `(platform, video_id)`.
+同步引擎按 `(platform, video_id)` 查询 SQLite。
 
-- If a row already exists with a successful download, skip the item
-- If a row exists in failed state, the engine may retry in a later enhancement, but version 1 can treat retries conservatively
-- If no row exists, continue to download
+- 如果已经存在成功下载记录，则跳过
+- 如果存在失败记录，是否自动重试可以在后续版本增强，第一版先保守处理
+- 如果不存在，则继续下载
 
-### Step 7. Download
+### 第七步：下载
 
-The app invokes `yt-dlp` with the authenticated browser context required for the current site. The exact invocation details may differ by platform, but the behavior target is always the highest available quality.
+程序用当前平台所需的已登录上下文调用 `yt-dlp`。不同平台的命令细节可以不同，但统一目标都是下载最高可获取画质。
 
-### Step 8. Archive finalize
+### 第八步：归档落盘
 
-The finished media file is written directly into or moved into:
+下载完成的媒体文件直接写入或移动到：
 
 `<download_root>/<platform>/<author_name>/<title> [<video_id>].<ext>`
 
-### Step 9. Persistence and progress reporting
+### 第九步：持久化与进度更新
 
-The database row is updated and the UI counters are refreshed. Failures are recorded without aborting the whole run.
+程序更新数据库记录，并刷新界面统计。单个视频失败时只记录错误，不中断整个同步任务。
 
-## Douyin Version 1 Adapter Requirements
+## 抖音第一版适配器要求
 
-The Douyin adapter must support these behaviors:
+`DouyinAdapter` 至少要支持这些能力：
 
-- Confirm that the current page is a favorites page for the logged-in account
-- Discover individual favorite video entries while the page scrolls
-- Resolve a stable Douyin video ID before deduplication
-- Extract author name and title reliably enough for archive naming
-- Pass a page URL or downloadable target to `yt-dlp`
+- 判断当前页面是否为当前登录账号的收藏页
+- 在滚动过程中发现单个收藏视频条目
+- 在真正去重前解析出稳定的抖音视频 ID
+- 足够可靠地提取作者名和标题，用于归档命名
+- 向 `yt-dlp` 提供可用的视频页地址或下载目标
 
-The adapter must tolerate these real-world conditions:
+它还必须容忍这些真实情况：
 
-- Lazy-loaded lists
-- Occasional missing titles
-- Repeated cards while scrolling
-- Temporary page timing issues
+- 懒加载列表
+- 偶尔缺失标题
+- 滚动时重复出现的卡片
+- 临时性的页面时序波动
 
-The adapter should deduplicate candidates in memory during a run before handing them to SQLite-backed persistence, but SQLite remains the final source of truth.
+适配器可以在单次运行内先做一层内存去重，但最终仍以 SQLite 作为唯一真相来源。
 
-## Error Handling Strategy
+## 错误处理策略
 
-Version 1 should prefer resilience over perfection.
+第一版优先追求“不中断整批任务”，而不是追求极端完美。
 
-### Blocking errors
+### 阻断性错误
 
-These prevent a run from starting:
+这些错误会直接阻止同步开始：
 
-- Chrome could not be launched
-- Automation could not connect to the dedicated Chrome session
-- Current page is not recognized as a supported favorites page
-- SQLite database could not be opened
-- `yt-dlp` is missing or unusable
+- Chrome 启动失败
+- 自动化层无法连接到专用 Chrome
+- 当前页面不是支持的收藏页
+- SQLite 无法打开
+- `yt-dlp` 缺失或不可用
 
-### Item-level errors
+### 单项错误
 
-These mark a single video as failed but do not stop the run:
+这些错误只会导致当前视频失败，不会终止整次同步：
 
-- Metadata could not be resolved
-- Video page became unavailable
-- Authentication expired
-- `yt-dlp` returned an error
-- File move or final write failed
+- 元数据解析失败
+- 视频页面失效
+- 登录态过期
+- `yt-dlp` 返回错误
+- 文件移动或最终写入失败
 
-For failed items, the app stores the best available error text in `videos.error_message` and continues.
+失败时，程序把可获取到的最佳错误信息写入 `videos.error_message`，然后继续处理下一个视频。
 
-## Stop and Resume Behavior
+## 停止与恢复
 
-The user can stop an active run from the UI.
+你可以在界面中手动停止同步任务。
 
-Stop behavior:
+停止行为：
 
-- The engine stops accepting new work
-- The current item is allowed to finish its current safe boundary
-- The run is marked `stopped`
+- 引擎停止接收新的处理项
+- 当前视频会在一个安全边界处结束
+- 当前任务状态记为 `stopped`
 
-Resume behavior for version 1 is implicit rather than explicit. The user starts a new sync run, and SQLite deduplication skips all already-downloaded items. This is sufficient for the first version and avoids building a separate checkpoint system too early.
+第一版不单独做复杂断点续传机制，而是采用“重新发起一次同步 + SQLite 去重跳过已完成项”的方式恢复。这已经足够支撑第一版，也避免过早引入额外复杂度。
 
-## Filesystem Rules
+## 文件系统规则
 
-Windows-safe naming must be enforced consistently.
+必须统一处理 Windows 文件命名约束。
 
-Normalization requirements:
+规范化要求：
 
-- Replace invalid characters such as `<>:"/\\|?*`
-- Trim trailing spaces and periods
-- Collapse excessive whitespace
-- Keep names readable, not hash-based
+- 替换非法字符，例如 `<>:"/\\|?*`
+- 去除结尾空格和句点
+- 合并多余空白字符
+- 尽量保持可读性，不使用纯哈希命名
 
-If two different videos somehow still map to the same display title, the embedded `[video_id]` keeps the final filename unique.
+即使两个视频标题完全相同，文件名中的 `[video_id]` 也能保证最终路径不冲突。
 
-## Extensibility Plan
+## 扩展方案
 
-The core app should be platform-agnostic outside the adapter layer.
+除了适配器层之外，核心应用应该尽量平台无关。
 
-When adding Bilibili, Kuaishou, or YouTube later:
+未来新增哔哩哔哩、快手、YouTube 时：
 
-- Reuse the same UI
-- Reuse the same SQLite schema
-- Reuse the same archive manager
-- Reuse the same sync engine
-- Add a new adapter that implements the common interface
+- 复用同一套桌面界面
+- 复用同一套 SQLite 结构
+- 复用同一套归档管理器
+- 复用同一套同步引擎
+- 只新增对应平台的适配器实现
 
-This design intentionally keeps "how to read the site" separate from "how to download, store, and track media."
+该设计的核心原则是：把“如何读取站点”与“如何下载、存储、追踪媒体”彻底分开。
 
-## Suggested Technology Shape
+## 建议技术形态
 
-The exact language can still be chosen during implementation planning, but the structure should support:
+具体语言仍可在实现计划阶段最终确定，但整体技术结构需要满足：
 
-- Desktop UI
-- Chrome automation
-- SQLite access
-- Process execution for `yt-dlp`
-- Cross-platform-safe path handling even if version 1 is Windows-first
+- 桌面界面能力
+- Chrome 自动化能力
+- SQLite 访问能力
+- 调用 `yt-dlp` 的进程执行能力
+- 即使第一版偏 Windows，也应具备跨平台安全的路径处理能力
 
-If implementation stays in a single language, Python is a pragmatic first choice because it has mature support for desktop tooling, browser automation, SQLite, and process orchestration.
+如果尽量保持单语言实现，Python 是一个很务实的起点，因为它在桌面工具、浏览器自动化、SQLite 和进程编排上都比较成熟。
 
-## Testing Strategy
+## 测试策略
 
-Testing for version 1 should focus on boundaries that are stable and worth automating.
+第一版的自动化测试应主要覆盖那些稳定、值得测的边界。
 
-Good automated targets:
+适合自动化测试的部分：
 
-- Filename normalization
-- Archive path generation
-- SQLite deduplication behavior
-- Sync engine state transitions around downloaded, skipped, failed
-- Adapter-independent orchestration logic using fake adapter outputs
+- 文件名规范化
+- 归档路径生成
+- SQLite 去重逻辑
+- 同步引擎对下载成功、跳过、失败的状态流转
+- 使用伪造适配器输出时的适配器无关编排逻辑
 
-Testing that should be minimized or isolated:
+应尽量减少或隔离的测试：
 
-- Full live Douyin end-to-end automation in unit tests
-- Hard-coded timing-dependent UI tests
+- 直接依赖真实抖音页面的完整端到端单元测试
+- 强依赖时间等待的脆弱 UI 自动化测试
 
-A small number of manual integration checks are still necessary because live platform pages are unstable by nature.
+由于真实平台页面天然不稳定，第一版仍然需要少量人工集成验证。
 
-## Open Implementation Decisions
+## 待实现阶段确定的工程决策
 
-These are intentionally deferred to the implementation plan, not left ambiguous:
+这些问题会在实现计划中定稿，但不会影响当前产品设计本身：
 
-- Desktop framework selection
-- Exact Chrome automation library
-- Exact `yt-dlp` invocation flags and cookie/session handoff method
-- Logging format and log file location
-- Whether failed rows are retried automatically on the next run or only on explicit user action
+- 具体桌面框架选择
+- 具体 Chrome 自动化库选择
+- `yt-dlp` 的具体参数和登录态传递方式
+- 日志格式和日志文件位置
+- 失败记录是在下一次同步时自动重试，还是只在显式操作时重试
 
-The product behavior itself is already fixed by this design; the remaining choices are engineering details.
+产品行为边界已经由本设计固定，剩下的是工程实现细节。
