@@ -1,5 +1,8 @@
 from pathlib import Path
+from subprocess import CompletedProcess
+from unittest.mock import patch
 
+from video2local.domain import SourceType, VideoMetadata
 from video2local.downloader import DownloadRequest, YtDlpService
 
 
@@ -64,3 +67,42 @@ def test_infer_extension_returns_last_suffix_without_dot() -> None:
     assert service.infer_extension("D:/downloads/archive.tar.gz") == "gz"
     assert service.infer_extension("D:/downloads/no_extension") == ""
     assert service.infer_extension("D:/downloads/.hiddenfile") == ""
+
+
+def test_build_request_uses_metadata_title_and_id_for_target_name(tmp_path: Path) -> None:
+    service = YtDlpService(binary_name="yt-dlp")
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="735003",
+        title="海边落日",
+        author_name="王五",
+        page_url="https://www.douyin.com/video/735003",
+        download_url="https://www.douyin.com/video/735003",
+    )
+
+    request = service.build_request(metadata=metadata, download_dir=tmp_path, cookies_from_browser="chrome")
+
+    assert request.filename_stem == "海边落日 [735003]"
+
+
+def test_download_returns_extension_and_output_path_from_completed_process(tmp_path: Path) -> None:
+    service = YtDlpService(binary_name="yt-dlp")
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="735004",
+        title="晴天",
+        author_name="赵六",
+        page_url="https://www.douyin.com/video/735004",
+        download_url="https://www.douyin.com/video/735004",
+    )
+    output_path = str(tmp_path / "晴天 [735004].mp4")
+    completed = CompletedProcess(args=["yt-dlp"], returncode=0, stdout=f"note\n{output_path}\n", stderr="")
+
+    with patch("video2local.downloader.subprocess.run", return_value=completed) as run_mock:
+        file_ext, local_path = service.download(metadata=metadata, target_dir=tmp_path)
+
+    assert file_ext == "mp4"
+    assert local_path == output_path
+    assert run_mock.called is True
