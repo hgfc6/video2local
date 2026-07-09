@@ -14,6 +14,8 @@ class FakeEngine:
     launched: bool = False
     stopped: bool = False
     downloads_opened: bool = False
+    previewed: bool = False
+    flat_output: bool = False
 
     def launch_chrome(self) -> None:
         self.launched = True
@@ -53,6 +55,31 @@ class FakeEngine:
             "skipped_count": 1,
             "failed_count": 0,
         }
+
+    def preview_sync(self):
+        self.previewed = True
+        return type("PreviewResult", (), {
+            "source": SourceDescriptor(
+                platform="douyin",
+                source_type=SourceType.FAVORITES,
+                page_url="https://www.douyin.com/user/self?showTab=favorite_collection",
+            ),
+            "items": [
+                type("PreviewItem", (), {
+                    "provider_id": "kukutool",
+                    "metadata": type("Metadata", (), {
+                        "video_id": "735001",
+                        "title": "海边夜景",
+                        "author_name": "作者甲",
+                    })(),
+                    "selected_quality_label": "超高清",
+                    "selected_file_size": 67819321,
+                })()
+            ],
+        })()
+
+    def set_flat_output(self, enabled: bool) -> None:
+        self.flat_output = enabled
 
 
 def test_main_controller_updates_status_when_sync_starts() -> None:
@@ -149,6 +176,40 @@ def test_main_controller_can_show_latest_sync_summary() -> None:
     controller.show_latest_summary()
 
     assert controller.summary_text == "最近一次同步: completed，发现 3，下载 2，跳过 1，失败 0"
+
+
+def test_main_controller_can_toggle_flat_output_mode() -> None:
+    engine = FakeEngine()
+    controller = MainController(engine=engine)
+
+    controller.set_flat_output(True)
+
+    assert engine.flat_output is True
+    assert controller.flat_output_enabled is True
+
+
+def test_main_controller_reports_preview_table_summary_after_preview() -> None:
+    engine = FakeEngine()
+    controller = MainController(engine=engine)
+
+    controller.preview_sync()
+    controller.wait_for_sync(timeout=1.0)
+
+    assert controller.status_text == "预览完成"
+    assert controller.detail_text.endswith("共预览 1 条")
+
+
+def test_main_controller_can_preview_sync_items() -> None:
+    engine = FakeEngine()
+    controller = MainController(engine=engine)
+
+    controller.preview_sync()
+    controller.wait_for_sync(timeout=1.0)
+
+    assert engine.previewed is True
+    assert controller.status_text == "预览完成"
+    assert "海边夜景" in controller.summary_text
+    assert len(controller.sync_preview_items) == 1
 
 
 def test_main_controller_polls_live_progress_while_running() -> None:

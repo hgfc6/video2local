@@ -5,6 +5,7 @@ import subprocess
 import sys
 from urllib.request import Request, urlopen
 
+from video2local.archive import ArchiveManager
 from video2local.domain import SourceType, VideoMetadata
 
 
@@ -20,6 +21,7 @@ class DownloadRequest:
 class YtDlpService:
     def __init__(self, binary_name: str | list[str] | None = None) -> None:
         self.binary_name = binary_name
+        self.archive_manager = ArchiveManager(download_root=Path("."))
 
     def command_prefix(self) -> list[str]:
         if self.binary_name is None:
@@ -39,7 +41,8 @@ class YtDlpService:
         return DownloadRequest(
             url=metadata.download_url,
             download_dir=download_dir,
-            filename_stem=filename_stem or f"{metadata.title or metadata.video_id} [{metadata.video_id}]",
+            filename_stem=filename_stem
+            or self.archive_manager.build_filename_stem(video_id=metadata.video_id, title=metadata.title),
             cookies_from_browser=cookies_from_browser,
             cookies_file=cookies_file,
         )

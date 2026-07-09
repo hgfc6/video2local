@@ -1,5 +1,9 @@
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from video2local.adapters.base import SourceDescriptor
 
 
 class SourceType(StrEnum):
@@ -13,6 +17,12 @@ class SyncRunStatus(StrEnum):
     COMPLETED = "completed"
     STOPPED = "stopped"
     FAILED = "failed"
+
+
+class SyncQualityStrategy(StrEnum):
+    BEST_AVAILABLE = "best_available"
+    PREFER_ULTRA = "prefer_ultra"
+    PREFER_1080P = "prefer_1080p"
 
 
 @dataclass(frozen=True)
@@ -72,3 +82,17 @@ class ShareVariantDownloadResult:
     metadata: VideoMetadata
     variant: VideoVariant
     local_path: str
+
+
+@dataclass(frozen=True)
+class SyncPreviewItem:
+    provider_id: str
+    metadata: VideoMetadata
+    selected_quality_label: str | None
+    selected_file_size: int | None
+
+
+@dataclass(frozen=True)
+class SyncPreviewResult:
+    source: "SourceDescriptor"
+    items: list[SyncPreviewItem]

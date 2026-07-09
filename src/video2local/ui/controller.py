@@ -16,8 +16,13 @@ class MainController:
     summary_text: str = "暂无最近一次同步摘要"
     share_parse_result: object | None = None
     share_variants: list[object] = field(default_factory=list)
+    sync_preview_items: list[object] = field(default_factory=list)
+    results_mode: str = "sync_preview"
     output_dir_text: str = ""
     sync_limit_text: str = ""
+    retry_count_text: str = "1"
+    quality_strategy_text: str = "best_available"
+    flat_output_enabled: bool = False
 
     def __post_init__(self) -> None:
         self._lock = Lock()
@@ -53,6 +58,17 @@ class MainController:
         self.status_text = "同步进行中"
         self.detail_text = "正在准备同步任务"
         self._worker = Thread(target=self._run_sync, daemon=True)
+        self._worker.start()
+
+    def preview_sync(self) -> None:
+        worker = self._worker
+        if worker is not None and worker.is_alive():
+            self.status_text = "同步进行中"
+            self.detail_text = "请等待当前任务结束后再预览"
+            return
+        self.status_text = "正在生成预览"
+        self.detail_text = "正在扫描页面并解析预计下载版本"
+        self._worker = Thread(target=self._run_sync_preview, daemon=True)
         self._worker.start()
 
     def stop_sync(self) -> None:
@@ -138,6 +154,25 @@ class MainController:
         if hasattr(self.engine, "set_sync_limit"):
             self.engine.set_sync_limit(limit)
 
+    def set_retry_count(self, raw_value: str) -> None:
+        text = raw_value.strip()
+        retry_count = 1 if not text else int(text)
+        if retry_count < 0:
+            raise ValueError("失败重试次数不能小于 0")
+        self.retry_count_text = str(retry_count)
+        if hasattr(self.engine, "set_retry_count"):
+            self.engine.set_retry_count(retry_count)
+
+    def set_quality_strategy(self, strategy: str) -> None:
+        self.quality_strategy_text = strategy
+        if hasattr(self.engine, "set_quality_strategy"):
+            self.engine.set_quality_strategy(strategy)
+
+    def set_flat_output(self, enabled: bool) -> None:
+        self.flat_output_enabled = enabled
+        if hasattr(self.engine, "set_flat_output"):
+            self.engine.set_flat_output(enabled)
+
     def wait_for_sync(self, timeout: float | None = None) -> None:
         worker = self._worker
         if worker is None:
@@ -172,6 +207,16 @@ class MainController:
             return
         self._apply_summary(summary)
         self.show_latest_summary()
+
+    def _run_sync_preview(self) -> None:
+        try:
+            result = self.engine.preview_sync()
+        except Exception as exc:
+            with self._lock:
+                self.status_text = f"错误: {exc}"
+                self.detail_text = "同步预览失败，请检查当前页面和登录态"
+            return
+        self._apply_sync_preview(result)
 
     def _run_sample_download(self) -> None:
         try:
@@ -220,6 +265,7 @@ class MainController:
         with self._lock:
             self.share_parse_result = result
             self.share_variants = variants
+            self.results_mode = "share_parse"
             self.status_text = "分享链接解析完成"
             self.source_text = f"解析来源: {provider_id}"
             self.detail_text = f"{metadata.author_name} / {metadata.title or metadata.video_id}"
@@ -244,3 +290,21 @@ class MainController:
             else:
                 title = progress.current_title or progress.current_video_id
                 self.detail_text = f"最后处理: {progress.current_author_name} / {title}"
+            if summary.report_path:
+                self.summary_text = f"结果清单: {summary.report_path}"
+
+    def _apply_sync_preview(self, result: object) -> None:
+        items = list(getattr(result, "items", []))
+        source = getattr(result, "source")
+        with self._lock:
+            self.sync_preview_items = items
+            self.results_mode = "sync_preview"
+            self.status_text = "预览完成"
+            self.detail_text = f"{source.platform} / {source.source_type.value}，共预览 {len(items)} 条"
+            if items:
+                first_item = items[0]
+                metadata = getattr(first_item, "metadata")
+                quality_label = getattr(first_item, "selected_quality_label", None) or "未知"
+                self.summary_text = f"首条预览: {metadata.author_name} / {metadata.title or metadata.video_id} / {quality_label}"
+            else:
+                self.summary_text = "当前预览为空"

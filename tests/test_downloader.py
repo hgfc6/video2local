@@ -110,7 +110,7 @@ def test_build_request_uses_metadata_title_and_id_for_target_name(tmp_path: Path
         platform="douyin",
         source_type=SourceType.FAVORITES,
         video_id="735003",
-        title="海边落日",
+        title="#海边落日",
         author_name="王五",
         page_url="https://www.douyin.com/video/735003",
         download_url="https://www.douyin.com/video/735003",
@@ -118,7 +118,7 @@ def test_build_request_uses_metadata_title_and_id_for_target_name(tmp_path: Path
 
     request = service.build_request(metadata=metadata, download_dir=tmp_path, cookies_from_browser="chrome")
 
-    assert request.filename_stem == "海边落日 [735003]"
+    assert request.filename_stem == "海边落日-735003"
 
 
 def test_download_returns_extension_and_output_path_from_completed_process(tmp_path: Path) -> None:

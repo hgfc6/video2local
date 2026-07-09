@@ -192,14 +192,18 @@ def test_start_sync_collects_candidates_probes_metadata_and_runs_engine(tmp_path
     with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
         with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=html_snapshots):
             with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
-                with patch.object(runtime.downloader, "probe_metadata", return_value=metadata) as probe_mock:
-                    with patch.object(runtime.sync_engine, "sync_items", return_value=summary) as sync_mock:
-                        result = runtime.start_sync()
+                    with patch.object(runtime.downloader, "probe_metadata", return_value=metadata) as probe_mock:
+                        def fake_sync_items(items, progress_callback=None, cookies_file=None, retry_count=0, report_dir=None, discovered_count=None):
+                            collected = list(items)
+                            assert collected == [metadata]
+                            return summary
+
+                        with patch.object(runtime.sync_engine, "sync_items", side_effect=fake_sync_items) as sync_mock:
+                            result = runtime.start_sync()
 
     assert result == summary
     assert probe_mock.call_count == 2
     sync_mock.assert_called_once()
-    assert sync_mock.call_args.args[0] == [metadata]
     assert sync_mock.call_args.kwargs["progress_callback"] == runtime._store_progress
 
 
@@ -226,11 +230,329 @@ def test_start_sync_respects_configured_item_limit(tmp_path: Path) -> None:
         with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=html_snapshots):
             with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
                 with patch.object(runtime.downloader, "probe_metadata", return_value=metadata) as probe_mock:
-                    with patch.object(runtime.sync_engine, "sync_items", return_value=summary) as sync_mock:
+                    def fake_sync_items(items, progress_callback=None, cookies_file=None, retry_count=0, report_dir=None, discovered_count=None):
+                        collected = list(items)
+                        assert collected == [metadata]
+                        return summary
+
+                    with patch.object(runtime.sync_engine, "sync_items", side_effect=fake_sync_items) as sync_mock:
                         runtime.start_sync()
 
     probe_mock.assert_called_once()
-    assert sync_mock.call_args.args[0] == [metadata]
+
+
+def test_start_sync_uses_kukutool_share_resolver_sequentially_when_enabled(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    settings = AppSettings(
+        platform_name=settings.platform_name,
+        supported_source_types=settings.supported_source_types,
+        paths=settings.paths,
+        share_resolvers=settings.share_resolvers.__class__(
+            enable_kukutool_fallback=True,
+            kukutool_base_url=settings.share_resolvers.kukutool_base_url,
+        ),
+    )
+    runtime = AppRuntime(settings=settings)
+    summary = SyncSummary(discovered_count=2, downloaded_count=2, skipped_count=0, failed_count=0)
+    html_snapshots = [
+        '<a href="/video/735001">video</a><a href="/video/735002">video2</a>',
+    ]
+    cookies_path = tmp_path / "cookies.txt"
+    resolved_urls: list[str] = []
+    captured_items: list[VideoMetadata] = []
+
+    def fake_resolve(url: str):
+        resolved_urls.append(url)
+        video_id = url.rsplit("/", 1)[-1]
+        return type("Resolution", (), {
+            "provider_id": "kukutool",
+            "source_url": url,
+            "canonical_url": url,
+            "payload": {
+                "aweme_detail": {
+                    "aweme_id": video_id,
+                    "desc": f"title-{video_id}",
+                    "author": {"nickname": f"author-{video_id}"},
+                    "video": {
+                        "video_fullinfo": [
+                            {
+                                "type": "1080p",
+                                "size": 3819934,
+                                "url": f"https://cdn.example.com/{video_id}-1080.mp4",
+                            },
+                            {
+                                "type": "超高清",
+                                "size": 67819321,
+                                "url": f"https://cdn.example.com/{video_id}-ultra.mp4",
+                            },
+                        ],
+                        "play_addr": {"url_list": [f"https://cdn.example.com/{video_id}-ultra.mp4"]},
+                    },
+                }
+            },
+        })()
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
+        with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=html_snapshots):
+            with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+                with patch.object(runtime.share_resolver, "resolve", side_effect=fake_resolve) as resolve_mock:
+                    with patch("video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail") as detail_mock:
+                        with patch.object(runtime.downloader, "probe_metadata") as probe_mock:
+                            def fake_sync_items(items, progress_callback=None, cookies_file=None, retry_count=0, report_dir=None, discovered_count=None):
+                                captured_items.extend(list(items))
+                                return summary
+
+                            with patch.object(runtime.sync_engine, "sync_items", side_effect=fake_sync_items) as sync_mock:
+                                runtime.start_sync()
+
+    assert resolve_mock.call_count == 2
+    assert resolved_urls == [
+        "https://www.douyin.com/video/735001",
+        "https://www.douyin.com/video/735002",
+    ]
+    detail_mock.assert_not_called()
+    probe_mock.assert_not_called()
+    assert [item.video_id for item in captured_items] == ["735001", "735002"]
+    assert captured_items[0].download_url == "https://cdn.example.com/735001-ultra.mp4"
+    assert captured_items[1].download_url == "https://cdn.example.com/735002-ultra.mp4"
+
+
+def test_start_sync_respects_prefer_1080_quality_strategy(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    settings = AppSettings(
+        platform_name=settings.platform_name,
+        supported_source_types=settings.supported_source_types,
+        paths=settings.paths,
+        share_resolvers=settings.share_resolvers.__class__(
+            enable_kukutool_fallback=True,
+            kukutool_base_url=settings.share_resolvers.kukutool_base_url,
+        ),
+    )
+    runtime = AppRuntime(settings=settings)
+    runtime.set_quality_strategy("prefer_1080p")
+    summary = SyncSummary(discovered_count=1, downloaded_count=1, skipped_count=0, failed_count=0)
+    cookies_path = tmp_path / "cookies.txt"
+    captured_items: list[VideoMetadata] = []
+
+    def fake_resolve(url: str):
+        return type("Resolution", (), {
+            "provider_id": "kukutool",
+            "source_url": url,
+            "canonical_url": url,
+            "payload": {
+                "aweme_detail": {
+                    "aweme_id": "735001",
+                    "desc": "title-735001",
+                    "author": {"nickname": "author-735001"},
+                    "video": {
+                        "video_fullinfo": [
+                            {"type": "1080p", "size": 3819934, "url": "https://cdn.example.com/735001-1080.mp4"},
+                            {"type": "超高清", "size": 67819321, "url": "https://cdn.example.com/735001-ultra.mp4"},
+                        ],
+                        "play_addr": {"url_list": ["https://cdn.example.com/735001-ultra.mp4"]},
+                    },
+                }
+            },
+        })()
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
+        with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/735001">video</a>']):
+                with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+                    with patch.object(runtime.share_resolver, "resolve", side_effect=fake_resolve):
+                        def fake_sync_items(items, progress_callback=None, cookies_file=None, retry_count=0, report_dir=None, discovered_count=None):
+                            captured_items.extend(list(items))
+                            return summary
+
+                        with patch.object(runtime.sync_engine, "sync_items", side_effect=fake_sync_items):
+                            runtime.start_sync()
+
+    assert captured_items[0].download_url == "https://cdn.example.com/735001-1080.mp4"
+
+
+def test_preview_sync_returns_preview_rows_with_selected_quality(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    settings = AppSettings(
+        platform_name=settings.platform_name,
+        supported_source_types=settings.supported_source_types,
+        paths=settings.paths,
+        share_resolvers=settings.share_resolvers.__class__(
+            enable_kukutool_fallback=True,
+            kukutool_base_url=settings.share_resolvers.kukutool_base_url,
+        ),
+    )
+    runtime = AppRuntime(settings=settings)
+    cookies_path = tmp_path / "cookies.txt"
+
+    def fake_resolve(url: str):
+        video_id = url.rsplit("/", 1)[-1]
+        return type("Resolution", (), {
+            "provider_id": "kukutool",
+            "source_url": url,
+            "canonical_url": url,
+            "payload": {
+                "aweme_detail": {
+                    "aweme_id": video_id,
+                    "desc": f"title-{video_id}",
+                    "author": {"nickname": f"author-{video_id}"},
+                    "video": {
+                        "video_fullinfo": [
+                            {"type": "1080p", "size": 3819934, "url": f"https://cdn.example.com/{video_id}-1080.mp4"},
+                            {"type": "超高清", "size": 67819321, "url": f"https://cdn.example.com/{video_id}-ultra.mp4"},
+                        ],
+                        "play_addr": {"url_list": [f"https://cdn.example.com/{video_id}-ultra.mp4"]},
+                    },
+                }
+            },
+        })()
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
+        with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/735001">video</a><a href="/video/735002">video2</a>']):
+            with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+                with patch.object(runtime.share_resolver, "resolve", side_effect=fake_resolve):
+                    preview = runtime.preview_sync()
+
+    assert preview.source.platform == "douyin"
+    assert len(preview.items) == 2
+    assert preview.items[0].provider_id == "kukutool"
+    assert preview.items[0].selected_quality_label == "超高清"
+    assert preview.items[0].selected_file_size == 67819321
+
+
+def test_start_sync_passes_retry_and_report_dir_to_sync_engine(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    runtime = AppRuntime(settings=settings)
+    runtime.set_retry_count(2)
+    summary = SyncSummary(discovered_count=1, downloaded_count=1, skipped_count=0, failed_count=0)
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="735001",
+        title="演示视频",
+        author_name="作者A",
+        page_url="https://www.douyin.com/video/735001",
+        download_url="https://www.douyin.com/video/735001",
+    )
+    cookies_path = tmp_path / "cookies.txt"
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
+        with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/735001">video</a>']):
+            with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+                with patch.object(runtime.downloader, "probe_metadata", return_value=metadata):
+                    with patch.object(runtime.sync_engine, "sync_items", return_value=summary) as sync_mock:
+                        runtime.start_sync()
+
+    assert sync_mock.call_args.kwargs["retry_count"] == 2
+    assert sync_mock.call_args.kwargs["report_dir"] == runtime.output_root / "_sync_reports"
+
+
+def test_start_sync_streams_douyin_items_without_pre_resolving_everything(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    settings = AppSettings(
+        platform_name=settings.platform_name,
+        supported_source_types=settings.supported_source_types,
+        paths=settings.paths,
+        share_resolvers=settings.share_resolvers.__class__(
+            enable_kukutool_fallback=True,
+            kukutool_base_url=settings.share_resolvers.kukutool_base_url,
+        ),
+    )
+    runtime = AppRuntime(settings=settings)
+    cookies_path = tmp_path / "cookies.txt"
+    resolve_calls: list[str] = []
+    download_calls: list[str] = []
+
+    def fake_resolve(url: str):
+        resolve_calls.append(url)
+        video_id = url.rsplit("/", 1)[-1]
+        return type("Resolution", (), {
+            "provider_id": "kukutool",
+            "source_url": url,
+            "canonical_url": url,
+            "payload": {
+                "aweme_detail": {
+                    "aweme_id": video_id,
+                    "desc": f"title-{video_id}",
+                    "author": {"nickname": f"author-{video_id}"},
+                    "video": {
+                        "video_fullinfo": [
+                            {"type": "超高清", "size": 67819321, "url": f"https://cdn.example.com/{video_id}-ultra.mp4"},
+                        ],
+                        "play_addr": {"url_list": [f"https://cdn.example.com/{video_id}-ultra.mp4"]},
+                    },
+                }
+            },
+        })()
+
+    def fake_sync_items(items, progress_callback=None, cookies_file=None, retry_count=0, report_dir=None, discovered_count=None):
+        iterator = iter(items)
+        first_item = next(iterator)
+        assert resolve_calls == ["https://www.douyin.com/video/735001"]
+        rest_items = list(iterator)
+        collected = [first_item, *rest_items]
+        download_calls.extend([item.video_id for item in collected])
+        assert resolve_calls == [
+            "https://www.douyin.com/video/735001",
+            "https://www.douyin.com/video/735002",
+        ]
+        return SyncSummary(discovered_count=2, downloaded_count=2, skipped_count=0, failed_count=0)
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
+        with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/735001">video</a><a href="/video/735002">video2</a>']):
+            with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+                with patch.object(runtime.share_resolver, "resolve", side_effect=fake_resolve):
+                    with patch.object(runtime.sync_engine, "sync_items", side_effect=fake_sync_items):
+                        runtime.start_sync()
+
+    assert download_calls == ["735001", "735002"]
+
+
+def test_start_sync_falls_back_to_existing_browser_pipeline_when_kukutool_resolution_fails(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    settings = AppSettings(
+        platform_name=settings.platform_name,
+        supported_source_types=settings.supported_source_types,
+        paths=settings.paths,
+        share_resolvers=settings.share_resolvers.__class__(
+            enable_kukutool_fallback=True,
+            kukutool_base_url=settings.share_resolvers.kukutool_base_url,
+        ),
+    )
+    runtime = AppRuntime(settings=settings)
+    summary = SyncSummary(discovered_count=1, downloaded_count=1, skipped_count=0, failed_count=0)
+    detail_payload = {
+        "aweme_detail": {
+            "aweme_id": "735001",
+            "desc": "native-title",
+            "author": {"nickname": "native-author"},
+            "video": {
+                "bit_rate": [
+                    {
+                        "bit_rate": 1347641,
+                        "play_addr": {"url_list": ["https://cdn.example.com/native.mp4"]},
+                    }
+                ]
+            },
+        }
+    }
+    cookies_path = tmp_path / "cookies.txt"
+    captured_items: list[VideoMetadata] = []
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
+        with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/735001">video</a>']):
+            with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+                with patch.object(runtime.share_resolver, "resolve", side_effect=RuntimeError("kukutool limited")) as resolve_mock:
+                    with patch("video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail", return_value=detail_payload) as detail_mock:
+                        def fake_sync_items(items, progress_callback=None, cookies_file=None, retry_count=0, report_dir=None, discovered_count=None):
+                            captured_items.extend(list(items))
+                            return summary
+
+                        with patch.object(runtime.sync_engine, "sync_items", side_effect=fake_sync_items):
+                            runtime.start_sync()
+
+    resolve_mock.assert_called_once_with("https://www.douyin.com/video/735001")
+    detail_mock.assert_called_once_with("https://www.douyin.com/video/735001")
+    assert len(captured_items) == 1
+    assert captured_items[0].download_url == "https://cdn.example.com/native.mp4"
 
 
 def test_start_sync_uses_browser_aweme_detail_pipeline_for_douyin(tmp_path: Path) -> None:
@@ -253,21 +575,25 @@ def test_start_sync_uses_browser_aweme_detail_pipeline_for_douyin(tmp_path: Path
             },
         }
     }
+    captured_items: list[VideoMetadata] = []
 
     with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=post"):
         with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/7062344670323526953">video</a>']):
             with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=tmp_path / "cookies.txt"):
                 with patch("video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail", return_value=detail_payload) as detail_mock:
                     with patch.object(runtime.downloader, "probe_metadata") as probe_mock:
-                        with patch.object(runtime.sync_engine, "sync_items", return_value=summary) as sync_mock:
+                        def fake_sync_items(items, progress_callback=None, cookies_file=None, retry_count=0, report_dir=None, discovered_count=None):
+                            captured_items.extend(list(items))
+                            return summary
+
+                        with patch.object(runtime.sync_engine, "sync_items", side_effect=fake_sync_items):
                             runtime.start_sync()
 
     detail_mock.assert_called_once_with("https://www.douyin.com/video/7062344670323526953")
     probe_mock.assert_not_called()
-    items = sync_mock.call_args.args[0]
-    assert len(items) == 1
-    assert items[0].video_id == "7062344670323526953"
-    assert items[0].download_url == "https://cdn.example.com/high.mp4"
+    assert len(captured_items) == 1
+    assert captured_items[0].video_id == "7062344670323526953"
+    assert captured_items[0].download_url == "https://cdn.example.com/high.mp4"
 def test_start_sync_stores_last_progress_from_engine_callback(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     runtime = AppRuntime(settings=settings)
@@ -281,7 +607,8 @@ def test_start_sync_stores_last_progress_from_engine_callback(tmp_path: Path) ->
         download_url="https://www.douyin.com/video/735001",
     )
 
-    def fake_sync_items(items, progress_callback=None, cookies_file=None):
+    def fake_sync_items(items, progress_callback=None, cookies_file=None, retry_count=0, report_dir=None, discovered_count=None):
+        list(items)
         progress_callback(
             SyncProgress(
                 discovered_count=1,
@@ -387,9 +714,13 @@ def test_start_sync_exports_cookie_file_and_reuses_it_for_download_pipeline(tmp_
     with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
         with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/735001">video</a>']):
             with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path) as export_mock:
-                with patch.object(runtime.downloader, "probe_metadata", return_value=metadata) as probe_mock:
-                    with patch.object(runtime.sync_engine, "sync_items", return_value=summary) as sync_mock:
-                        runtime.start_sync()
+                    with patch.object(runtime.downloader, "probe_metadata", return_value=metadata) as probe_mock:
+                        def fake_sync_items(items, progress_callback=None, cookies_file=None, retry_count=0, report_dir=None, discovered_count=None):
+                            list(items)
+                            return summary
+
+                        with patch.object(runtime.sync_engine, "sync_items", side_effect=fake_sync_items) as sync_mock:
+                            runtime.start_sync()
 
     export_mock.assert_called_once()
     assert probe_mock.call_args.kwargs["cookies_file"] == cookies_path
@@ -679,10 +1010,50 @@ def test_download_share_variant_saves_selected_quality_with_quality_suffix(tmp_p
         variants=[variant],
     )
 
-    with patch.object(runtime.downloader, "download", return_value=("mp4", str(tmp_path / "downloads" / "douyin" / "香菜严选" / "分享视频 [7651428709099242127] [720p].mp4"))) as download_mock:
+    with patch.object(runtime.downloader, "download", return_value=("mp4", str(tmp_path / "downloads" / "douyin" / "香菜严选" / "分享视频-7651428709099242127-720p.mp4"))) as download_mock:
         result = runtime.download_share_variant(parse_result, "720_1_1")
 
-    assert result.local_path.endswith("[720p].mp4")
+    assert result.local_path.endswith("-720p.mp4")
     assert download_mock.call_args.args[0].download_url == "https://cdn.example.com/720.mp4"
-    assert download_mock.call_args.kwargs["filename_stem"] == "分享视频 [7651428709099242127] [720p]"
+    assert download_mock.call_args.kwargs["filename_stem"] == "分享视频-7651428709099242127-720p"
     assert download_mock.call_args.args[1] == custom_dir / "douyin" / "香菜严选"
+
+
+def test_download_share_variant_can_write_directly_into_output_root(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    runtime = AppRuntime(settings=settings)
+    custom_dir = tmp_path / "custom-downloads"
+    runtime.set_output_root(custom_dir)
+    runtime.set_flat_output(True)
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.SHARE_LINK,
+        video_id="7651428709099242127",
+        title="分享视频",
+        author_name="香菜严选",
+        page_url="https://www.douyin.com/video/7651428709099242127",
+        download_url="https://cdn.example.com/original.mp4",
+    )
+    variant = VideoVariant(
+        variant_id="720_1_1",
+        quality_label="720p",
+        codec_label="H.265",
+        bit_rate=1971327,
+        file_size=2086404,
+        width=720,
+        height=1280,
+        download_url="https://cdn.example.com/720.mp4",
+        is_recommended=True,
+    )
+    parse_result = ShareParseResult(
+        provider_id="native",
+        source_url="https://v.douyin.com/5MF6Y_tP8nk/",
+        canonical_url="https://www.douyin.com/video/7651428709099242127",
+        metadata=metadata,
+        variants=[variant],
+    )
+
+    with patch.object(runtime.downloader, "download", return_value=("mp4", str(custom_dir / "分享视频-7651428709099242127-720p.mp4"))) as download_mock:
+        runtime.download_share_variant(parse_result, "720_1_1")
+
+    assert download_mock.call_args.args[1] == custom_dir

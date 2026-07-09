@@ -20,24 +20,43 @@ WINDOWS_RESERVED_NAMES = {
 @dataclass
 class ArchiveManager:
     download_root: Path
+    flatten_into_root: bool = False
+
+    def normalize_title_text(self, raw: str) -> str:
+        normalized = raw.replace("#", "，").lstrip("，").strip()
+        return normalized
 
     def safe_name(self, raw: str) -> str:
-        cleaned = INVALID_CHARS.sub(" ", raw).strip().rstrip(".")
+        cleaned = INVALID_CHARS.sub(" ", self.normalize_title_text(raw)).strip().rstrip(".")
         collapsed = WHITESPACE.sub(" ", cleaned).strip()
         candidate = collapsed or "untitled"
         if candidate.upper() in WINDOWS_RESERVED_NAMES:
             return f"{candidate}_"
         return candidate
 
+    def build_filename_stem(
+        self,
+        *,
+        video_id: str,
+        title: str | None,
+        suffix: str | None = None,
+    ) -> str:
+        safe_video_id = self.safe_name(video_id)
+        safe_title = self.safe_name(title or safe_video_id)
+        parts = [safe_title, safe_video_id]
+        if suffix:
+            parts.append(self.safe_name(suffix))
+        return "-".join(parts)
+
     def normalize_extension(self, raw: str) -> str:
         normalized = self.safe_name(raw.strip().lstrip(".")).replace(" ", ".").lower()
         return normalized or "bin"
 
     def build_target_path(self, metadata: VideoMetadata, file_ext: str) -> Path:
+        extension = self.normalize_extension(file_ext)
+        filename = f"{self.build_filename_stem(video_id=metadata.video_id, title=metadata.title)}.{extension}"
+        if self.flatten_into_root:
+            return self.download_root / filename
         platform = self.safe_name(metadata.platform)
         author = self.safe_name(metadata.author_name)
-        video_id = self.safe_name(metadata.video_id)
-        title = self.safe_name(metadata.title or video_id)
-        extension = self.normalize_extension(file_ext)
-        filename = f"{title} [{video_id}].{extension}"
         return self.download_root / platform / author / filename

@@ -24,13 +24,13 @@ def test_build_target_path_sanitizes_path_components(tmp_path: Path) -> None:
         platform="dou/yin",
         source_type=SourceType.FAVORITES,
         video_id="735001",
-        title='晚霞<>:"散步',
+        title='晚霞<>:"#散步',
         author_name="张/三",
         page_url="https://www.douyin.com/video/735001",
         download_url="https://www.douyin.com/video/735001",
     )
 
-    expected = tmp_path / "dou yin" / "张 三" / "晚霞 散步 [735001].mp4"
+    expected = tmp_path / "dou yin" / "张 三" / "晚霞 ，散步-735001.mp4"
 
     assert manager.build_target_path(metadata, "mp4") == expected
 
@@ -47,7 +47,7 @@ def test_build_target_path_uses_sanitized_video_id_when_title_missing(tmp_path: 
         download_url="https://www.douyin.com/video/vid01",
     )
 
-    expected = tmp_path / "douyin" / "AUX_" / "vid 01 [vid 01].mp4"
+    expected = tmp_path / "douyin" / "AUX_" / "vid 01-vid 01.mp4"
 
     assert manager.build_target_path(metadata, ".MP4") == expected
 
@@ -64,6 +64,23 @@ def test_build_target_path_normalizes_multi_part_extension(tmp_path: Path) -> No
         download_url="https://www.youtube.com/watch?v=abc123",
     )
 
-    expected = tmp_path / "youtube" / "creator" / "demo [abc123].tar.gz"
+    expected = tmp_path / "youtube" / "creator" / "demo-abc123.tar.gz"
 
     assert manager.build_target_path(metadata, "tar.gz") == expected
+
+
+def test_build_target_path_can_flatten_into_selected_root(tmp_path: Path) -> None:
+    manager = ArchiveManager(download_root=tmp_path, flatten_into_root=True)
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="abc123",
+        title="演示标题",
+        author_name="作者A",
+        page_url="https://www.douyin.com/video/abc123",
+        download_url="https://www.douyin.com/video/abc123",
+    )
+
+    expected = tmp_path / "演示标题-abc123.mp4"
+
+    assert manager.build_target_path(metadata, "mp4") == expected
