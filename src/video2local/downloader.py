@@ -34,12 +34,12 @@ class YtDlpService:
         download_dir: Path,
         cookies_from_browser: str | None,
         cookies_file: Path | None = None,
+        filename_stem: str | None = None,
     ) -> DownloadRequest:
-        title = metadata.title or metadata.video_id
         return DownloadRequest(
             url=metadata.download_url,
             download_dir=download_dir,
-            filename_stem=f"{title} [{metadata.video_id}]",
+            filename_stem=filename_stem or f"{metadata.title or metadata.video_id} [{metadata.video_id}]",
             cookies_from_browser=cookies_from_browser,
             cookies_file=cookies_file,
         )
@@ -122,25 +122,34 @@ class YtDlpService:
         metadata: VideoMetadata,
         target_dir: Path,
         cookies_file: Path | None = None,
+        filename_stem: str | None = None,
     ) -> tuple[str, str]:
         if self.should_download_direct(metadata):
-            return self._download_direct_media(metadata, target_dir)
+            return self._download_direct_media(metadata, target_dir, filename_stem=filename_stem)
         request = self.build_request(
             metadata=metadata,
             download_dir=target_dir,
             cookies_from_browser="chrome",
             cookies_file=cookies_file,
+            filename_stem=filename_stem,
         )
         command = self.build_command(request)
         completed = subprocess.run(command, capture_output=True, text=True, check=True)
         output_path = completed.stdout.strip().splitlines()[-1]
         return self.infer_extension(output_path), output_path
 
-    def _download_direct_media(self, metadata: VideoMetadata, target_dir: Path) -> tuple[str, str]:
+    def _download_direct_media(
+        self,
+        metadata: VideoMetadata,
+        target_dir: Path,
+        *,
+        filename_stem: str | None = None,
+    ) -> tuple[str, str]:
         request = self.build_request(
             metadata=metadata,
             download_dir=target_dir,
             cookies_from_browser=None,
+            filename_stem=filename_stem,
         )
         output_path = request.download_dir / f"{request.filename_stem}.mp4"
         http_request = Request(

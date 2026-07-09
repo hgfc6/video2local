@@ -372,3 +372,55 @@ def test_repository_initialize_migrates_legacy_videos_table_with_missing_columns
     assert row["file_size"] == 2048
     assert row["duration_seconds"] == 12
     assert row["error_message"] is None
+
+
+def test_repository_initialize_rebuilds_legacy_videos_table_without_share_link_source_type(tmp_path: Path) -> None:
+    database_path = tmp_path / "video2local.db"
+    with sqlite3.connect(database_path) as conn:
+        conn.execute(
+            """
+            create table videos (
+                id integer primary key,
+                platform text not null,
+                video_id text not null,
+                source_type text not null check(source_type in ('favorites', 'author_videos')),
+                author_name text not null,
+                title text,
+                page_url text not null,
+                download_url text not null,
+                local_path text,
+                file_ext text,
+                downloaded_at text,
+                file_size integer,
+                duration_seconds integer,
+                error_message text,
+                download_status text not null check(download_status in ('downloaded', 'skipped_existing', 'failed')),
+                created_at text not null default current_timestamp,
+                updated_at text not null default current_timestamp,
+                unique(platform, video_id)
+            )
+            """
+        )
+
+    repo = VideoRepository(database_path)
+    repo.initialize()
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.SHARE_LINK,
+        video_id="share-1",
+        title="分享视频",
+        author_name="香菜严选",
+        page_url="https://www.douyin.com/video/share-1",
+        download_url="https://cdn.example.com/share-1",
+    )
+
+    repo.upsert_downloaded_video(
+        metadata=metadata,
+        local_path="downloads/douyin/香菜严选/分享视频 [share-1] [720p].mp4",
+        file_ext="mp4",
+    )
+
+    row = repo.get_video("douyin", "share-1")
+
+    assert row is not None
+    assert row["source_type"] == "share_link"

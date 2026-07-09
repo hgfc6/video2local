@@ -3,7 +3,7 @@ import json
 from unittest.mock import patch
 import asyncio
 
-from video2local.browser import ChromeLaunchSpec, ChromeRemoteSession, write_netscape_cookies
+from video2local.browser import ChromeLaunchSpec, ChromeRemoteSession, DouyinSignedSession, write_netscape_cookies
 
 
 def test_chrome_launch_args_use_dedicated_profile_and_remote_debugging_port(tmp_path: Path) -> None:
@@ -195,3 +195,143 @@ def test_fetch_active_page_html_prefers_page_matching_active_target_url() -> Non
             html = asyncio.run(session._fetch_active_page_html_async())
 
     assert html == "<html>/video/7062344670323526953</html>"
+
+
+def test_signed_session_prefers_page_emitted_detail_response(tmp_path: Path) -> None:
+    payload = {"aweme_detail": {"aweme_id": "7651428709099242127"}}
+
+    class FakeResponse:
+        url = "https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=7651428709099242127&a_bogus=signed"
+
+        async def json(self):
+            return payload
+
+    class FakeResponseInfo:
+        def __init__(self, response) -> None:
+            self.value = response
+
+    class FakeExpectResponse:
+        def __init__(self, response) -> None:
+            self.response = response
+
+        async def __aenter__(self):
+            return FakeResponseInfo(self.response)
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.url = "about:blank"
+
+        def expect_response(self, predicate, timeout: int):
+            response = FakeResponse()
+            assert predicate(response) is True
+            assert timeout == 15000
+            return FakeExpectResponse(response)
+
+        async def goto(self, url: str, wait_until: str, timeout: int):
+            assert wait_until == "domcontentloaded"
+            assert timeout == 60000
+            if "v.douyin.com" in url:
+                self.url = "https://www.douyin.com/video/7651428709099242127"
+            else:
+                self.url = url
+
+        async def wait_for_timeout(self, timeout_ms: int):
+            assert timeout_ms == 2000
+
+    class FakeBrowser:
+        def __init__(self) -> None:
+            self.page = FakePage()
+
+        async def new_page(self):
+            return self.page
+
+        async def close(self) -> None:
+            return None
+
+    class FakeChromium:
+        async def launch(self, executable_path: str, headless: bool):
+            assert executable_path.endswith("chrome.exe")
+            assert headless is True
+            return FakeBrowser()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+    class FakeAsyncPlaywright:
+        async def __aenter__(self):
+            return FakePlaywright()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    session = DouyinSignedSession(chrome_executable_path=tmp_path / "chrome.exe")
+
+    with patch("video2local.browser.async_playwright", return_value=FakeAsyncPlaywright()):
+        canonical_url, result = asyncio.run(session._fetch_share_aweme_detail_async("https://v.douyin.com/5MF6Y_tP8nk/"))
+
+    assert canonical_url == "https://www.douyin.com/video/7651428709099242127"
+    assert result == payload
+
+
+def test_signed_session_builds_web_detail_url_with_f2_style_query_params() -> None:
+    session = DouyinSignedSession()
+
+    with patch.object(DouyinSignedSession, "_gen_false_ms_token", return_value="ms-token-demo"):
+        with patch.object(DouyinSignedSession, "_gen_verify_fp", return_value="verify-demo"):
+            with patch.object(DouyinSignedSession, "_generate_a_bogus", return_value="bogus-demo"):
+                url = session._build_signed_detail_url("7651428709099242127", "Mozilla/5.0 Demo")
+
+    assert "https://www.douyin.com/aweme/v1/web/aweme/detail/?" in url
+    assert "aweme_id=7651428709099242127" in url
+    assert "aid=6383" in url
+    assert "device_platform=webapp" in url
+    assert "channel=channel_pc_web" in url
+    assert "verifyFp=verify-demo" in url
+    assert "msToken=ms-token-demo" in url
+    assert "a_bogus=bogus-demo" in url
+
+
+def test_signed_session_fetches_detail_over_http_with_cookie_headers() -> None:
+    payload = {"aweme_detail": {"aweme_id": "7651428709099242127"}}
+    captured = {}
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(payload).encode("utf-8")
+
+    def fake_urlopen(request, timeout: int):
+        captured["url"] = request.full_url
+        captured["timeout"] = timeout
+        captured["headers"] = dict(request.header_items())
+        return FakeResponse()
+
+    session = DouyinSignedSession()
+    cookies = [
+        {"name": "ttwid", "value": "ttwid-demo"},
+        {"name": "msToken", "value": "mstoken-demo"},
+    ]
+
+    with patch.object(DouyinSignedSession, "_build_signed_detail_url", return_value="https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id=7651428709099242127"):
+        with patch("video2local.browser.urlopen", side_effect=fake_urlopen):
+            result = session._fetch_detail_over_http(
+                aweme_id="7651428709099242127",
+                user_agent="Mozilla/5.0 Demo",
+                cookies=cookies,
+                referer="https://www.douyin.com/video/7651428709099242127",
+            )
+
+    assert result == payload
+    assert captured["url"].endswith("aweme_id=7651428709099242127")
+    assert captured["timeout"] == 60
+    assert captured["headers"]["User-agent"] == "Mozilla/5.0 Demo"
+    assert captured["headers"]["Referer"] == "https://www.douyin.com/video/7651428709099242127"
+    assert captured["headers"]["Cookie"] == "ttwid=ttwid-demo; msToken=mstoken-demo"

@@ -208,3 +208,114 @@ def test_main_controller_can_run_sample_download() -> None:
     assert controller.status_text == "样本下载完成"
     assert controller.detail_text == "h6ii / #情绪 #成长"
     assert controller.summary_text == "样本文件: downloads/_smoke_test/sample.mp4"
+
+
+def test_main_controller_can_parse_share_link_and_store_variants() -> None:
+    @dataclass
+    class Variant:
+        variant_id: str
+        quality_label: str
+        codec_label: str
+        bit_rate: int | None
+        file_size: int | None
+
+    @dataclass
+    class Metadata:
+        video_id: str
+        title: str
+        author_name: str
+
+    @dataclass
+    class ParseResult:
+        provider_id: str
+        source_url: str
+        canonical_url: str
+        metadata: Metadata
+        variants: list[Variant]
+
+    @dataclass
+    class ShareEngine:
+        def parse_share_text(self, raw_text: str):
+            assert "v.douyin.com" in raw_text
+            return ParseResult(
+                provider_id="kukutool",
+                source_url="https://v.douyin.com/5MF6Y_tP8nk/",
+                canonical_url="https://www.douyin.com/video/7651428709099242127",
+                metadata=Metadata(
+                    video_id="7651428709099242127",
+                    title="分享视频",
+                    author_name="香菜严选",
+                ),
+                variants=[
+                    Variant(
+                        variant_id="720_1_1",
+                        quality_label="720p",
+                        codec_label="H.265",
+                        bit_rate=1971327,
+                        file_size=2086404,
+                    )
+                ],
+            )
+
+    controller = MainController(engine=ShareEngine())
+
+    controller.parse_share_text("https://v.douyin.com/5MF6Y_tP8nk/")
+    controller.wait_for_sync(timeout=1.0)
+
+    assert controller.status_text == "分享链接解析完成"
+    assert controller.source_text == "解析来源: kukutool"
+    assert controller.detail_text == "香菜严选 / 分享视频"
+    assert controller.summary_text == "香菜严选 / 分享视频，已解析 1 个清晰度版本"
+    assert len(controller.share_variants) == 1
+
+
+def test_main_controller_can_download_selected_share_variant() -> None:
+    @dataclass
+    class DownloadResult:
+        local_path: str
+
+    @dataclass
+    class Variant:
+        variant_id: str
+        quality_label: str
+        codec_label: str
+        bit_rate: int | None
+        file_size: int | None
+
+    @dataclass
+    class Metadata:
+        video_id: str
+        title: str
+        author_name: str
+
+    @dataclass
+    class ParseResult:
+        source_url: str
+        canonical_url: str
+        metadata: Metadata
+        variants: list[Variant]
+
+    @dataclass
+    class ShareEngine:
+        downloaded_variant_id: str | None = None
+
+        def download_share_variant(self, parse_result, variant_id: str):
+            self.downloaded_variant_id = variant_id
+            return DownloadResult(local_path="downloads/douyin/香菜严选/分享视频 [7651428709099242127] [720p].mp4")
+
+    engine = ShareEngine()
+    controller = MainController(engine=engine)
+    controller.share_parse_result = ParseResult(
+        source_url="https://v.douyin.com/5MF6Y_tP8nk/",
+        canonical_url="https://www.douyin.com/video/7651428709099242127",
+        metadata=Metadata(video_id="7651428709099242127", title="分享视频", author_name="香菜严选"),
+        variants=[Variant(variant_id="720_1_1", quality_label="720p", codec_label="H.265", bit_rate=1971327, file_size=2086404)],
+    )
+    controller.share_variants = controller.share_parse_result.variants
+
+    controller.download_share_variant("720_1_1")
+    controller.wait_for_sync(timeout=1.0)
+
+    assert engine.downloaded_variant_id == "720_1_1"
+    assert controller.status_text == "分享视频下载完成"
+    assert controller.summary_text.endswith("[720p].mp4")

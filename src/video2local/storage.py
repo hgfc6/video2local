@@ -37,6 +37,7 @@ class VideoRepository:
     def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.database_path) as conn:
+            self._ensure_videos_table_supports_current_source_types(conn)
             conn.execute(
                 f"""
                 create table if not exists videos (
@@ -79,6 +80,94 @@ class VideoRepository:
             )
             self._ensure_columns(conn, "videos", VIDEO_COLUMNS)
             self._ensure_columns(conn, "sync_runs", SYNC_RUN_COLUMNS)
+
+    def _ensure_videos_table_supports_current_source_types(self, conn: sqlite3.Connection) -> None:
+        row = conn.execute(
+            "select sql from sqlite_master where type = 'table' and name = 'videos'"
+        ).fetchone()
+        if row is None or row[0] is None:
+            return
+        create_sql = row[0]
+        if "share_link" in create_sql:
+            return
+        conn.execute("alter table videos rename to videos_legacy")
+        conn.execute(
+            f"""
+            create table videos (
+                id integer primary key,
+                platform text not null,
+                video_id text not null,
+                source_type text not null check(source_type in ({ALLOWED_SOURCE_TYPES_SQL})),
+                author_name text not null,
+                title text,
+                page_url text not null,
+                download_url text not null,
+                local_path text,
+                file_ext text,
+                downloaded_at text,
+                file_size integer,
+                duration_seconds integer,
+                error_message text,
+                download_status text not null check(download_status in ({ALLOWED_DOWNLOAD_STATUSES_SQL})),
+                created_at text not null default current_timestamp,
+                updated_at text not null default current_timestamp,
+                unique(platform, video_id)
+            )
+            """
+        )
+        legacy_columns = {
+            row[1]
+            for row in conn.execute("pragma table_info(videos_legacy)").fetchall()
+        }
+        ordered_columns = (
+            "id",
+            "platform",
+            "video_id",
+            "source_type",
+            "author_name",
+            "title",
+            "page_url",
+            "download_url",
+            "local_path",
+            "file_ext",
+            "downloaded_at",
+            "file_size",
+            "duration_seconds",
+            "error_message",
+            "download_status",
+            "created_at",
+            "updated_at",
+        )
+        select_clause = ", ".join(
+            column_name if column_name in legacy_columns else f"NULL as {column_name}"
+            for column_name in ordered_columns
+        )
+        conn.execute(
+            f"""
+            insert into videos (
+                id,
+                platform,
+                video_id,
+                source_type,
+                author_name,
+                title,
+                page_url,
+                download_url,
+                local_path,
+                file_ext,
+                downloaded_at,
+                file_size,
+                duration_seconds,
+                error_message,
+                download_status,
+                created_at,
+                updated_at
+            )
+            select {select_clause}
+            from videos_legacy
+            """
+        )
+        conn.execute("drop table videos_legacy")
 
     def _ensure_columns(
         self,

@@ -5,6 +5,7 @@ from enum import StrEnum
 class SourceType(StrEnum):
     FAVORITES = "favorites"
     AUTHOR_VIDEOS = "author_videos"
+    SHARE_LINK = "share_link"
 
 
 class SyncRunStatus(StrEnum):
@@ -41,4 +42,33 @@ class SyncProgress:
 @dataclass(frozen=True)
 class SampleDownloadResult:
     metadata: VideoMetadata
+    local_path: str
+
+
+@dataclass(frozen=True)
+class VideoVariant:
+    variant_id: str
+    quality_label: str
+    codec_label: str
+    bit_rate: int | None
+    file_size: int | None
+    width: int | None
+    height: int | None
+    download_url: str
+    is_recommended: bool = False
+
+
+@dataclass(frozen=True)
+class ShareParseResult:
+    provider_id: str
+    source_url: str
+    canonical_url: str
+    metadata: VideoMetadata
+    variants: list[VideoVariant]
+
+
+@dataclass(frozen=True)
+class ShareVariantDownloadResult:
+    metadata: VideoMetadata
+    variant: VideoVariant
     local_path: str

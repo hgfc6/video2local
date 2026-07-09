@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from dataclasses import field
+from pathlib import Path
 from threading import Lock, Thread
 
 from video2local.domain import SampleDownloadResult
@@ -9,12 +11,22 @@ from video2local.sync_engine import SyncSummary
 class MainController:
     engine: object
     status_text: str = "待命"
+    source_text: str = "解析来源: -"
     detail_text: str = "未开始同步"
     summary_text: str = "暂无最近一次同步摘要"
+    share_parse_result: object | None = None
+    share_variants: list[object] = field(default_factory=list)
+    output_dir_text: str = ""
+    sync_limit_text: str = ""
 
     def __post_init__(self) -> None:
         self._lock = Lock()
         self._worker: Thread | None = None
+        output_root = getattr(self.engine, "output_root", None)
+        if output_root is not None:
+            self.output_dir_text = str(output_root)
+        else:
+            self.output_dir_text = str(Path.cwd())
 
     def launch_chrome(self) -> None:
         if hasattr(self.engine, "launch_chrome"):
@@ -66,6 +78,32 @@ class MainController:
         self._worker = Thread(target=self._run_sample_download, daemon=True)
         self._worker.start()
 
+    def parse_share_text(self, raw_text: str) -> None:
+        worker = self._worker
+        if worker is not None and worker.is_alive():
+            self.status_text = "同步进行中"
+            self.detail_text = "请等待当前任务结束后再解析分享链接"
+            return
+        self.status_text = "正在解析分享链接"
+        self.detail_text = "正在提取链接并加载可用清晰度版本"
+        self._worker = Thread(target=self._run_share_parse, args=(raw_text,), daemon=True)
+        self._worker.start()
+
+    def download_share_variant(self, variant_id: str) -> None:
+        worker = self._worker
+        if worker is not None and worker.is_alive():
+            self.status_text = "同步进行中"
+            self.detail_text = "请等待当前任务结束后再下载分享视频"
+            return
+        if self.share_parse_result is None:
+            self.status_text = "错误: 尚未解析分享链接"
+            self.detail_text = "请先解析分享链接并选择清晰度版本"
+            return
+        self.status_text = "正在下载分享视频"
+        self.detail_text = f"正在下载所选版本: {variant_id}"
+        self._worker = Thread(target=self._run_share_variant_download, args=(variant_id,), daemon=True)
+        self._worker.start()
+
     def show_latest_summary(self) -> None:
         if not hasattr(self.engine, "get_latest_sync_run"):
             self.summary_text = "当前运行时未提供同步摘要"
@@ -78,6 +116,27 @@ class MainController:
             f"最近一次同步: {row['status']}，发现 {row['discovered_count']}，下载 {row['downloaded_count']}，"
             f"跳过 {row['skipped_count']}，失败 {row['failed_count']}"
         )
+
+    def set_output_dir(self, raw_path: str) -> None:
+        target = Path(raw_path).expanduser()
+        if hasattr(self.engine, "set_output_root"):
+            self.engine.set_output_root(target)
+        self.output_dir_text = str(target)
+        self.status_text = "输出目录已更新"
+        self.detail_text = str(target)
+
+    def set_sync_limit(self, raw_value: str) -> None:
+        text = raw_value.strip()
+        if not text:
+            limit = None
+            self.sync_limit_text = ""
+        else:
+            limit = int(text)
+            if limit <= 0:
+                raise ValueError("前 N 个视频必须是正整数")
+            self.sync_limit_text = text
+        if hasattr(self.engine, "set_sync_limit"):
+            self.engine.set_sync_limit(limit)
 
     def wait_for_sync(self, timeout: float | None = None) -> None:
         worker = self._worker
@@ -124,6 +183,26 @@ class MainController:
             return
         self._apply_sample_result(result)
 
+    def _run_share_parse(self, raw_text: str) -> None:
+        try:
+            result = self.engine.parse_share_text(raw_text)
+        except Exception as exc:
+            with self._lock:
+                self.status_text = f"错误: {exc}"
+                self.detail_text = "分享链接解析失败，请检查文案或链接是否有效"
+            return
+        self._apply_share_parse_result(result)
+
+    def _run_share_variant_download(self, variant_id: str) -> None:
+        try:
+            result = self.engine.download_share_variant(self.share_parse_result, variant_id)
+        except Exception as exc:
+            with self._lock:
+                self.status_text = f"错误: {exc}"
+                self.detail_text = "分享视频下载失败，请重新解析或更换清晰度版本"
+            return
+        self._apply_share_variant_download_result(result)
+
     def _apply_sample_result(self, result: SampleDownloadResult) -> None:
         metadata = getattr(result, "metadata", result)
         title = getattr(metadata, "title", None) or getattr(metadata, "video_id")
@@ -133,6 +212,24 @@ class MainController:
             self.status_text = "样本下载完成"
             self.detail_text = f"{author_name} / {title}"
             self.summary_text = f"样本文件: {local_path}"
+
+    def _apply_share_parse_result(self, result: object) -> None:
+        metadata = getattr(result, "metadata")
+        variants = list(getattr(result, "variants"))
+        provider_id = getattr(result, "provider_id", "-")
+        with self._lock:
+            self.share_parse_result = result
+            self.share_variants = variants
+            self.status_text = "分享链接解析完成"
+            self.source_text = f"解析来源: {provider_id}"
+            self.detail_text = f"{metadata.author_name} / {metadata.title or metadata.video_id}"
+            self.summary_text = f"{metadata.author_name} / {metadata.title or metadata.video_id}，已解析 {len(variants)} 个清晰度版本"
+
+    def _apply_share_variant_download_result(self, result: object) -> None:
+        with self._lock:
+            self.status_text = "分享视频下载完成"
+            self.detail_text = getattr(result, "local_path")
+            self.summary_text = getattr(result, "local_path")
 
     def _apply_summary(self, summary: SyncSummary) -> None:
         with self._lock:

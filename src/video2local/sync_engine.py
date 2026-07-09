@@ -43,9 +43,9 @@ class SyncEngine:
             if self._stop_event.is_set():
                 status = SyncRunStatus.STOPPED.value
                 break
-            if self.repository.has_downloaded_video(metadata.platform, metadata.video_id):
+            target_path = self.archive_manager.build_target_path(metadata, "mp4")
+            if target_path.exists():
                 skipped_count += 1
-                self.repository.record_skipped_video(metadata)
                 if progress_callback is not None:
                     progress_callback(
                         SyncProgress(
@@ -61,7 +61,6 @@ class SyncEngine:
                     )
                 continue
 
-            target_path = self.archive_manager.build_target_path(metadata, "mp4")
             target_path.parent.mkdir(parents=True, exist_ok=True)
 
             try:
@@ -70,15 +69,8 @@ class SyncEngine:
                     target_path.parent,
                     cookies_file=cookies_file,
                 )
-                self.repository.upsert_downloaded_video(
-                    metadata,
-                    local_path=local_path,
-                    file_ext=file_ext,
-                    file_size=self._safe_file_size(local_path),
-                )
                 downloaded_count += 1
             except Exception as exc:
-                self.repository.record_failed_video(metadata, error_message=str(exc))
                 failed_count += 1
             if progress_callback is not None:
                 progress_callback(

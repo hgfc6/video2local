@@ -3,9 +3,10 @@ from unittest.mock import patch
 import os
 
 from video2local.app_runtime import AppRuntime
-from video2local.domain import SourceType, SyncProgress, VideoMetadata
+from video2local.domain import ShareParseResult, SourceType, SyncProgress, VideoMetadata, VideoVariant
 from video2local.browser import ChromeLaunchSpec
 from video2local.config import AppSettings
+from video2local.resolvers import KukutoolResolver, NativeDouyinResolver
 from video2local.sync_engine import SyncSummary
 
 
@@ -27,6 +28,96 @@ def test_launch_chrome_creates_directories_and_starts_process(tmp_path: Path) ->
     assert settings.paths.downloads_dir.exists()
     detect_mock.assert_called_once_with(settings.paths.chrome_profile_dir)
     popen_mock.assert_called_once_with(launch_spec.to_argv())
+
+
+def test_runtime_configures_native_share_resolver_only_by_default(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    runtime = AppRuntime(settings=settings)
+
+    assert [type(item) for item in runtime.share_resolver.resolvers] == [NativeDouyinResolver]
+
+
+def test_runtime_prefers_kukutool_resolver_when_enabled(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    settings = AppSettings(
+        platform_name=settings.platform_name,
+        supported_source_types=settings.supported_source_types,
+        paths=settings.paths,
+        share_resolvers=settings.share_resolvers.__class__(
+            enable_kukutool_fallback=True,
+            kukutool_base_url=settings.share_resolvers.kukutool_base_url,
+        ),
+    )
+
+    runtime = AppRuntime(settings=settings)
+
+    assert [type(item) for item in runtime.share_resolver.resolvers] == [KukutoolResolver, NativeDouyinResolver]
+
+
+def test_parse_share_text_prefers_kukutool_variants_when_enabled(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    settings = AppSettings(
+        platform_name=settings.platform_name,
+        supported_source_types=settings.supported_source_types,
+        paths=settings.paths,
+        share_resolvers=settings.share_resolvers.__class__(
+            enable_kukutool_fallback=True,
+            kukutool_base_url=settings.share_resolvers.kukutool_base_url,
+        ),
+    )
+    runtime = AppRuntime(settings=settings)
+    native_detail_payload = {
+        "aweme_detail": {
+            "aweme_id": "7651428709099242127",
+            "desc": "分享视频",
+            "duration": 8467,
+            "author": {"nickname": "香菜严选"},
+            "video": {
+                "bit_rate": [
+                    {
+                        "gear_name": "1080_1_1",
+                        "bit_rate": 3524000,
+                        "is_h265": 0,
+                        "play_addr": {
+                            "data_size": 3819934,
+                            "width": 1080,
+                            "height": 1920,
+                            "url_list": ["https://cdn.example.com/native-1080.mp4"],
+                        },
+                    }
+                ]
+            },
+        }
+    }
+    kukutool_payload = {
+        "title": "",
+        "type": "video",
+        "url": "https://cdn.example.com/native-1080.mp4",
+        "videos": [
+            {
+                "url": "https://cdn.example.com/native-1080.mp4",
+                "video_fullinfo": [
+                    {"type": "1080p", "size": 3819934, "url": "https://cdn.example.com/native-1080.mp4"},
+                    {"type": "超高清", "size": 67819321, "url": "https://cdn.example.com/ultra.mp4"},
+                ],
+            }
+        ],
+    }
+
+    with patch("video2local.app_runtime.KukutoolSession.parse_share_url", return_value=kukutool_payload) as kukutool_parse_mock:
+        with patch(
+            "video2local.app_runtime.DouyinSignedSession.fetch_share_aweme_detail",
+            return_value=("https://www.douyin.com/video/7651428709099242127", native_detail_payload),
+        ) as signed_fetch_mock:
+            result = runtime.parse_share_text("https://v.douyin.com/5MF6Y_tP8nk/")
+
+    kukutool_parse_mock.assert_called_once()
+    signed_fetch_mock.assert_called_once()
+    assert result.metadata.video_id == "7651428709099242127"
+    assert result.provider_id == "kukutool"
+    assert result.variants[0].quality_label == "超高清"
+    assert result.variants[0].file_size == 67819321
+    assert result.variants[0].download_url == "https://cdn.example.com/ultra.mp4"
 
 
 def test_start_sync_detects_supported_douyin_source(tmp_path: Path) -> None:
@@ -112,6 +203,36 @@ def test_start_sync_collects_candidates_probes_metadata_and_runs_engine(tmp_path
     assert sync_mock.call_args.kwargs["progress_callback"] == runtime._store_progress
 
 
+def test_start_sync_respects_configured_item_limit(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    runtime = AppRuntime(settings=settings)
+    runtime.set_sync_limit(1)
+    summary = SyncSummary(discovered_count=1, downloaded_count=1, skipped_count=0, failed_count=0)
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="735001",
+        title="演示视频",
+        author_name="作者A",
+        page_url="https://www.douyin.com/video/735001",
+        download_url="https://www.douyin.com/video/735001",
+    )
+    html_snapshots = [
+        '<a href="/video/735001">video</a><a href="/video/735002">video2</a>',
+    ]
+    cookies_path = tmp_path / "cookies.txt"
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
+        with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=html_snapshots):
+            with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+                with patch.object(runtime.downloader, "probe_metadata", return_value=metadata) as probe_mock:
+                    with patch.object(runtime.sync_engine, "sync_items", return_value=summary) as sync_mock:
+                        runtime.start_sync()
+
+    probe_mock.assert_called_once()
+    assert sync_mock.call_args.args[0] == [metadata]
+
+
 def test_start_sync_uses_browser_aweme_detail_pipeline_for_douyin(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     runtime = AppRuntime(settings=settings)
@@ -188,7 +309,7 @@ def test_start_sync_stores_last_progress_from_engine_callback(tmp_path: Path) ->
     assert runtime.last_progress.downloaded_count == 1
 
 
-def test_start_sync_records_latest_sync_run_summary(tmp_path: Path) -> None:
+def test_start_sync_records_latest_sync_run_summary_in_memory(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     runtime = AppRuntime(settings=settings)
     summary = SyncSummary(
@@ -216,10 +337,9 @@ def test_start_sync_records_latest_sync_run_summary(tmp_path: Path) -> None:
                     with patch.object(runtime.sync_engine, "sync_items", return_value=summary):
                         runtime.start_sync()
 
-    row = runtime.repository.get_latest_sync_run()
+    row = runtime.get_latest_sync_run()
 
     assert row is not None
-    assert row["platform"] == "douyin"
     assert row["status"] == "completed"
     assert row["discovered_count"] == 2
     assert row["downloaded_count"] == 1
@@ -276,35 +396,33 @@ def test_start_sync_exports_cookie_file_and_reuses_it_for_download_pipeline(tmp_
     assert sync_mock.call_args.kwargs["cookies_file"] == cookies_path
 
 
-def test_get_latest_sync_run_returns_repository_row(tmp_path: Path) -> None:
+def test_get_latest_sync_run_returns_latest_in_memory_summary(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     runtime = AppRuntime(settings=settings)
-    runtime.ensure_directories()
-    run_id = runtime.repository.create_sync_run(platform="douyin")
-    runtime.repository.finish_sync_run(
-        run_id=run_id,
-        status="completed",
-        discovered_count=1,
-        downloaded_count=1,
-        skipped_count=0,
-        failed_count=0,
-    )
+    runtime._latest_sync_run = {
+        "status": "completed",
+        "discovered_count": 1,
+        "downloaded_count": 1,
+        "skipped_count": 0,
+        "failed_count": 0,
+    }
 
     row = runtime.get_latest_sync_run()
 
     assert row is not None
-    assert row["id"] == run_id
     assert row["status"] == "completed"
 
 
 def test_open_downloads_dir_uses_windows_shell(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     runtime = AppRuntime(settings=settings)
+    custom_dir = tmp_path / "custom-downloads"
+    runtime.set_output_root(custom_dir)
 
     with patch.object(os, "startfile", create=True) as startfile_mock:
         runtime.open_downloads_dir()
 
-    startfile_mock.assert_called_once_with(str(settings.paths.downloads_dir))
+    startfile_mock.assert_called_once_with(str(custom_dir))
 
 
 def test_download_first_visible_sample_writes_first_visible_video_to_smoke_test_dir(tmp_path: Path) -> None:
@@ -346,3 +464,225 @@ def test_download_first_visible_sample_writes_first_visible_video_to_smoke_test_
     assert result.local_path.endswith("sample.mp4")
     assert download_mock.call_args.args[0].video_id == "7062344670323526953"
     assert download_mock.call_args.args[1] == settings.paths.downloads_dir / "_smoke_test"
+
+
+def test_parse_share_text_returns_metadata_and_variants_without_login(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    runtime = AppRuntime(settings=settings)
+    payload = {
+        "aweme_detail": {
+            "aweme_id": "7651428709099242127",
+            "desc": "分享视频",
+            "duration": 8467,
+            "author": {"nickname": "香菜严选"},
+            "video": {
+                "bit_rate": [
+                    {
+                        "gear_name": "720_1_1",
+                        "bit_rate": 1971327,
+                        "is_h265": 1,
+                        "play_addr": {
+                            "data_size": 2086404,
+                            "width": 720,
+                            "height": 1280,
+                            "url_list": ["https://cdn.example.com/720.mp4"],
+                        },
+                    }
+                ]
+            },
+        }
+    }
+
+    with patch("video2local.app_runtime.DouyinPublicSession.fetch_share_aweme_detail", return_value=("https://www.douyin.com/video/7651428709099242127", payload)) as fetch_mock:
+        with patch("video2local.app_runtime.DouyinPublicSession.probe_content_length", return_value=2086404):
+            result = runtime.parse_share_text("https://v.douyin.com/5MF6Y_tP8nk/")
+
+    fetch_mock.assert_called_once()
+    assert result.metadata.video_id == "7651428709099242127"
+    assert result.canonical_url == "https://www.douyin.com/video/7651428709099242127"
+    assert result.provider_id == "native"
+    assert len(result.variants) == 1
+    assert result.variants[0].quality_label == "720p"
+    assert result.variants[0].file_size == 2086404
+
+
+def test_parse_share_text_prefers_signed_web_api_variants_when_available(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    runtime = AppRuntime(settings=settings)
+    signed_payload = {
+        "aweme_detail": {
+            "aweme_id": "7651428709099242127",
+            "desc": "分享视频",
+            "duration": 8467,
+            "author": {"nickname": "香菜严选"},
+            "video": {
+                "bit_rate": [
+                    {
+                        "gear_name": "720_1_1",
+                        "bit_rate": 1971327,
+                        "is_h265": 1,
+                        "play_addr": {
+                            "data_size": 2086404,
+                            "width": 720,
+                            "height": 1280,
+                            "url_list": ["https://cdn.example.com/720.mp4"],
+                        },
+                    },
+                    {
+                        "gear_name": "1080_1_1",
+                        "bit_rate": 9900000,
+                        "is_h265": 0,
+                        "play_addr": {
+                            "data_size": 64700000,
+                            "width": 1080,
+                            "height": 1920,
+                            "url_list": ["https://cdn.example.com/1080-ultra.mp4"],
+                        },
+                    },
+                ]
+            },
+        }
+    }
+
+    with patch(
+        "video2local.app_runtime.DouyinSignedSession.fetch_share_aweme_detail",
+        return_value=("https://www.douyin.com/video/7651428709099242127", signed_payload),
+    ) as signed_fetch_mock:
+        with patch("video2local.app_runtime.DouyinPublicSession.fetch_share_aweme_detail") as public_fetch_mock:
+            result = runtime.parse_share_text("https://v.douyin.com/5MF6Y_tP8nk/")
+
+    signed_fetch_mock.assert_called_once()
+    public_fetch_mock.assert_not_called()
+    assert result.metadata.video_id == "7651428709099242127"
+    assert result.provider_id == "native"
+    assert result.variants[0].quality_label == "1080p"
+    assert result.variants[0].file_size == 64700000
+    assert result.variants[0].download_url == "https://cdn.example.com/1080-ultra.mp4"
+
+
+def test_parse_share_text_falls_back_to_public_session_when_signed_web_api_fails(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    runtime = AppRuntime(settings=settings)
+    public_payload = {
+        "aweme_detail": {
+            "aweme_id": "7651428709099242127",
+            "desc": "分享视频",
+            "duration": 8467,
+            "author": {"nickname": "香菜严选"},
+            "video": {
+                "bit_rate": [
+                    {
+                        "gear_name": "720_1_1",
+                        "bit_rate": 1971327,
+                        "is_h265": 1,
+                        "play_addr": {
+                            "data_size": 2086404,
+                            "width": 720,
+                            "height": 1280,
+                            "url_list": ["https://cdn.example.com/720.mp4"],
+                        },
+                    }
+                ]
+            },
+        }
+    }
+
+    with patch(
+        "video2local.app_runtime.DouyinSignedSession.fetch_share_aweme_detail",
+        side_effect=RuntimeError("signed api unavailable"),
+    ) as signed_fetch_mock:
+        with patch(
+            "video2local.app_runtime.DouyinPublicSession.fetch_share_aweme_detail",
+            return_value=("https://www.douyin.com/video/7651428709099242127", public_payload),
+        ) as public_fetch_mock:
+            with patch("video2local.app_runtime.DouyinPublicSession.probe_content_length", return_value=2086404):
+                result = runtime.parse_share_text("https://v.douyin.com/5MF6Y_tP8nk/")
+
+    assert signed_fetch_mock.call_count == 2
+    public_fetch_mock.assert_called_once()
+    assert result.variants[0].quality_label == "720p"
+    assert result.variants[0].file_size == 2086404
+
+
+def test_parse_share_text_retries_signed_web_api_before_public_fallback(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    runtime = AppRuntime(settings=settings)
+    signed_payload = {
+        "aweme_detail": {
+            "aweme_id": "7651428709099242127",
+            "desc": "分享视频",
+            "duration": 8467,
+            "author": {"nickname": "香菜严选"},
+            "video": {
+                "bit_rate": [
+                    {
+                        "gear_name": "2160_1_1",
+                        "bit_rate": 5134767,
+                        "is_h265": 1,
+                        "play_addr": {
+                            "data_size": 5409478,
+                            "width": 2160,
+                            "height": 3840,
+                            "url_list": ["https://cdn.example.com/2160.mp4"],
+                        },
+                    }
+                ]
+            },
+        }
+    }
+
+    with patch(
+        "video2local.app_runtime.DouyinSignedSession.fetch_share_aweme_detail",
+        side_effect=[
+            RuntimeError("signed api timeout"),
+            ("https://www.douyin.com/video/7651428709099242127", signed_payload),
+        ],
+    ) as signed_fetch_mock:
+        with patch("video2local.app_runtime.DouyinPublicSession.fetch_share_aweme_detail") as public_fetch_mock:
+            result = runtime.parse_share_text("https://v.douyin.com/5MF6Y_tP8nk/")
+
+    assert signed_fetch_mock.call_count == 2
+    public_fetch_mock.assert_not_called()
+    assert result.variants[0].quality_label == "2160p"
+
+
+def test_download_share_variant_saves_selected_quality_with_quality_suffix(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    runtime = AppRuntime(settings=settings)
+    custom_dir = tmp_path / "custom-downloads"
+    runtime.set_output_root(custom_dir)
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.SHARE_LINK,
+        video_id="7651428709099242127",
+        title="分享视频",
+        author_name="香菜严选",
+        page_url="https://www.douyin.com/video/7651428709099242127",
+        download_url="https://cdn.example.com/original.mp4",
+    )
+    variant = VideoVariant(
+        variant_id="720_1_1",
+        quality_label="720p",
+        codec_label="H.265",
+        bit_rate=1971327,
+        file_size=2086404,
+        width=720,
+        height=1280,
+        download_url="https://cdn.example.com/720.mp4",
+        is_recommended=True,
+    )
+    parse_result = ShareParseResult(
+        provider_id="native",
+        source_url="https://v.douyin.com/5MF6Y_tP8nk/",
+        canonical_url="https://www.douyin.com/video/7651428709099242127",
+        metadata=metadata,
+        variants=[variant],
+    )
+
+    with patch.object(runtime.downloader, "download", return_value=("mp4", str(tmp_path / "downloads" / "douyin" / "香菜严选" / "分享视频 [7651428709099242127] [720p].mp4"))) as download_mock:
+        result = runtime.download_share_variant(parse_result, "720_1_1")
+
+    assert result.local_path.endswith("[720p].mp4")
+    assert download_mock.call_args.args[0].download_url == "https://cdn.example.com/720.mp4"
+    assert download_mock.call_args.kwargs["filename_stem"] == "分享视频 [7651428709099242127] [720p]"
+    assert download_mock.call_args.args[1] == custom_dir / "douyin" / "香菜严选"

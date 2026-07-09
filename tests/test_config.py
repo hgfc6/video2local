@@ -19,3 +19,5 @@ def test_default_settings_enable_douyin_favorites_and_author_pages(tmp_path: Pat
     assert settings.platform_name == "douyin"
     assert settings.supported_source_types == ("favorites", "author_videos")
     assert settings.paths == AppPaths.from_root(tmp_path)
+    assert settings.share_resolvers.enable_kukutool_fallback is False
+    assert settings.share_resolvers.kukutool_base_url == "https://dy.kukutool.com"

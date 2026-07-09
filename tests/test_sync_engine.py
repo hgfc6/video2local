@@ -7,34 +7,6 @@ from video2local.sync_engine import SyncEngine
 
 
 @dataclass
-class FakeRepository:
-    existing: set[tuple[str, str]]
-    saved: list[tuple[str, str]]
-    skipped: list[str] | None = None
-    failed: list[tuple[str, str]] | None = None
-
-    def has_downloaded_video(self, platform: str, video_id: str) -> bool:
-        return (platform, video_id) in self.existing
-
-    def upsert_downloaded_video(
-        self,
-        metadata: VideoMetadata,
-        local_path: str,
-        file_ext: str,
-        file_size: int | None = None,
-    ) -> None:
-        self.saved.append((metadata.video_id, local_path))
-
-    def record_skipped_video(self, metadata: VideoMetadata) -> None:
-        if self.skipped is not None:
-            self.skipped.append(metadata.video_id)
-
-    def record_failed_video(self, metadata: VideoMetadata, error_message: str) -> None:
-        if self.failed is not None:
-            self.failed.append((metadata.video_id, error_message))
-
-
-@dataclass
 class FakeDownloader:
     downloads: list[str]
 
@@ -49,10 +21,9 @@ class FakeDownloader:
 
 
 def test_sync_engine_skips_existing_video_and_downloads_new_one(tmp_path: Path) -> None:
-    repo = FakeRepository(existing={("douyin", "735001")}, saved=[], skipped=[], failed=[])
     downloader = FakeDownloader(downloads=[])
     archive = ArchiveManager(download_root=tmp_path)
-    engine = SyncEngine(repository=repo, downloader=downloader, archive_manager=archive)
+    engine = SyncEngine(repository=None, downloader=downloader, archive_manager=archive)
     videos = [
         VideoMetadata(
             platform="douyin",
@@ -73,6 +44,9 @@ def test_sync_engine_skips_existing_video_and_downloads_new_one(tmp_path: Path) 
             download_url="https://www.douyin.com/video/735002",
         ),
     ]
+    existing_path = archive.build_target_path(videos[0], "mp4")
+    existing_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_path.write_text("existing", encoding="utf-8")
 
     summary = engine.sync_items(videos)
 
@@ -80,15 +54,12 @@ def test_sync_engine_skips_existing_video_and_downloads_new_one(tmp_path: Path) 
     assert summary.skipped_count == 1
     assert summary.downloaded_count == 1
     assert downloader.downloads == ["735002"]
-    assert repo.saved[0][0] == "735002"
-    assert repo.skipped == ["735001"]
 
 
 def test_sync_engine_reports_progress_for_each_processed_item(tmp_path: Path) -> None:
-    repo = FakeRepository(existing={("douyin", "735001")}, saved=[], skipped=[], failed=[])
     downloader = FakeDownloader(downloads=[])
     archive = ArchiveManager(download_root=tmp_path)
-    engine = SyncEngine(repository=repo, downloader=downloader, archive_manager=archive)
+    engine = SyncEngine(repository=None, downloader=downloader, archive_manager=archive)
     events: list[SyncProgress] = []
     videos = [
         VideoMetadata(
@@ -110,6 +81,9 @@ def test_sync_engine_reports_progress_for_each_processed_item(tmp_path: Path) ->
             download_url="https://www.douyin.com/video/735002",
         ),
     ]
+    existing_path = archive.build_target_path(videos[0], "mp4")
+    existing_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_path.write_text("existing", encoding="utf-8")
 
     engine.sync_items(videos, progress_callback=events.append)
 
@@ -139,10 +113,9 @@ def test_sync_engine_stops_after_current_item_when_requested(tmp_path: Path) -> 
                 self.engine.request_stop()
             return ("mp4", str(target_dir / f"{metadata.title} [{metadata.video_id}].mp4"))
 
-    repo = FakeRepository(existing=set(), saved=[], skipped=[], failed=[])
     downloader = StoppableDownloader(downloads=[])
     archive = ArchiveManager(download_root=tmp_path)
-    engine = SyncEngine(repository=repo, downloader=downloader, archive_manager=archive)
+    engine = SyncEngine(repository=None, downloader=downloader, archive_manager=archive)
     downloader.engine = engine
     videos = [
         VideoMetadata(
@@ -191,10 +164,9 @@ def test_sync_engine_records_failed_video_and_continues(tmp_path: Path) -> None:
                 raise RuntimeError("network down")
             return ("mp4", str(target_dir / f"{metadata.title} [{metadata.video_id}].mp4"))
 
-    repo = FakeRepository(existing=set(), saved=[], skipped=[], failed=[])
     downloader = FlakyDownloader(downloads=[])
     archive = ArchiveManager(download_root=tmp_path)
-    engine = SyncEngine(repository=repo, downloader=downloader, archive_manager=archive)
+    engine = SyncEngine(repository=None, downloader=downloader, archive_manager=archive)
     videos = [
         VideoMetadata(
             platform="douyin",
@@ -220,5 +192,3 @@ def test_sync_engine_records_failed_video_and_continues(tmp_path: Path) -> None:
 
     assert summary.failed_count == 1
     assert summary.downloaded_count == 1
-    assert repo.failed == [("735020", "network down")]
-    assert repo.saved[0][0] == "735021"

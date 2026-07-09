@@ -3,6 +3,7 @@ from pathlib import Path
 
 DEFAULT_PLATFORM_NAME = "douyin"
 DEFAULT_SOURCE_TYPES = ("favorites", "author_videos")
+DEFAULT_KUKUTOOL_BASE_URL = "https://dy.kukutool.com"
 
 
 @dataclass(frozen=True)
@@ -26,10 +27,17 @@ class AppPaths:
 
 
 @dataclass(frozen=True)
+class ShareResolverSettings:
+    enable_kukutool_fallback: bool = False
+    kukutool_base_url: str = DEFAULT_KUKUTOOL_BASE_URL
+
+
+@dataclass(frozen=True)
 class AppSettings:
     platform_name: str
     supported_source_types: tuple[str, ...]
     paths: AppPaths
+    share_resolvers: ShareResolverSettings
 
     @classmethod
     def for_root(
@@ -38,11 +46,13 @@ class AppSettings:
         *,
         platform_name: str,
         supported_source_types: tuple[str, ...],
+        share_resolvers: ShareResolverSettings | None = None,
     ) -> "AppSettings":
         return cls(
             platform_name=platform_name,
             supported_source_types=supported_source_types,
             paths=AppPaths.from_root(root),
+            share_resolvers=share_resolvers or ShareResolverSettings(),
         )
 
     @classmethod
