@@ -15,7 +15,10 @@ def main() -> int:
         Path.cwd(),
         platform_name="douyin",
         supported_source_types=("favorites", "author_videos"),
-        share_resolvers=ShareResolverSettings(enable_kukutool_fallback=True),
+        share_resolvers=ShareResolverSettings(
+            enable_kukutool_fallback=True,
+            enabled_sources=("native", "kukutool"),
+        ),
     )
     controller = MainController(engine=AppRuntime(settings=settings))
     window = MainWindow(controller)

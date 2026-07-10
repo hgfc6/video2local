@@ -16,6 +16,7 @@ class FakeEngine:
     downloads_opened: bool = False
     previewed: bool = False
     flat_output: bool = False
+    resolver_sources: tuple[str, ...] = ("native", "kukutool")
 
     def launch_chrome(self) -> None:
         self.launched = True
@@ -66,12 +67,13 @@ class FakeEngine:
             ),
             "items": [
                 type("PreviewItem", (), {
-                    "provider_id": "kukutool",
                     "metadata": type("Metadata", (), {
                         "video_id": "735001",
                         "title": "海边夜景",
                         "author_name": "作者甲",
                     })(),
+                    "provider_summary": "kukutool + native",
+                    "variant_summary": "超高清(64.67 MB), 2160p(5.16 MB), 1080p(3.64 MB)",
                     "selected_quality_label": "超高清",
                     "selected_file_size": 67819321,
                 })()
@@ -80,6 +82,9 @@ class FakeEngine:
 
     def set_flat_output(self, enabled: bool) -> None:
         self.flat_output = enabled
+
+    def set_resolver_sources(self, sources: tuple[str, ...]) -> None:
+        self.resolver_sources = sources
 
 
 def test_main_controller_updates_status_when_sync_starts() -> None:
@@ -186,6 +191,16 @@ def test_main_controller_can_toggle_flat_output_mode() -> None:
 
     assert engine.flat_output is True
     assert controller.flat_output_enabled is True
+
+
+def test_main_controller_can_set_resolver_sources() -> None:
+    engine = FakeEngine()
+    controller = MainController(engine=engine)
+
+    controller.set_resolver_sources(("native",))
+
+    assert engine.resolver_sources == ("native",)
+    assert controller.resolver_sources == ("native",)
 
 
 def test_main_controller_reports_preview_table_summary_after_preview() -> None:

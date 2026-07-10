@@ -10,7 +10,6 @@ def test_app_paths_from_root_uses_workspace_relative_directories(tmp_path: Path)
     assert paths.data_dir == tmp_path / ".video2local"
     assert paths.chrome_profile_dir == tmp_path / ".video2local" / "chrome-profile"
     assert paths.downloads_dir == tmp_path / "downloads"
-    assert paths.database_path == tmp_path / ".video2local" / "video2local.db"
 
 
 def test_default_settings_enable_douyin_favorites_and_author_pages(tmp_path: Path) -> None:
@@ -21,3 +20,4 @@ def test_default_settings_enable_douyin_favorites_and_author_pages(tmp_path: Pat
     assert settings.paths == AppPaths.from_root(tmp_path)
     assert settings.share_resolvers.enable_kukutool_fallback is False
     assert settings.share_resolvers.kukutool_base_url == "https://dy.kukutool.com"
+    assert settings.share_resolvers.enabled_sources == ("native",)

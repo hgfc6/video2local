@@ -159,6 +159,29 @@ def test_kukutool_resolver_merges_kukutool_variants_with_native_metadata(tmp_pat
     assert result.payload["aweme_detail"]["video"]["video_fullinfo"][1]["type"] == "超高清"
 
 
+def test_kukutool_variant_only_resolution_does_not_request_douyin_metadata(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    resolver = KukutoolResolver(
+        settings=settings,
+        kukutool_session=KukutoolSession(),
+        signed_session=DouyinSignedSession(),
+        public_session=DouyinPublicSession(),
+    )
+    kukutool_payload = {
+        "url": "https://cdn.example.com/ultra.mp4",
+        "videos": [{"video_fullinfo": [{"type": "超高清", "url": "https://cdn.example.com/ultra.mp4"}]}],
+    }
+
+    with patch("video2local.resolvers.KukutoolSession.parse_share_url", return_value=kukutool_payload):
+        with patch("video2local.resolvers.DouyinSignedSession.fetch_share_aweme_detail") as signed_mock:
+            with patch("video2local.resolvers.DouyinPublicSession.fetch_share_aweme_detail") as public_mock:
+                result = resolver.resolve_variants_only("https://v.douyin.com/5MF6Y_tP8nk/")
+
+    signed_mock.assert_not_called()
+    public_mock.assert_not_called()
+    assert result.payload["aweme_detail"]["video"]["video_fullinfo"][0]["type"] == "超高清"
+
+
 def test_kukutool_resolver_uses_placeholder_metadata_when_native_enrichment_fails(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     resolver = KukutoolResolver(

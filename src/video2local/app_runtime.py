@@ -3,6 +3,7 @@ from dataclasses import replace
 import os
 from pathlib import Path
 import subprocess
+import time
 
 from video2local.archive import ArchiveManager
 from video2local.adapters.base import SourceDescriptor
@@ -10,7 +11,7 @@ from video2local.adapters.douyin import DouyinAdapter
 from video2local.browser import ChromeLaunchSpec, ChromeRemoteSession, DouyinPublicSession, DouyinSignedSession, KukutoolSession
 from video2local.config import AppSettings
 from video2local.downloader import YtDlpService
-from video2local.domain import SampleDownloadResult, ShareParseResult, ShareVariantDownloadResult, SourceType, SyncPreviewItem, SyncPreviewResult, SyncProgress, SyncQualityStrategy, SyncRunStatus, VideoMetadata, VideoVariant
+from video2local.domain import SampleDownloadResult, ShareParseResult, ShareVariantDownloadResult, SourceType, SyncPreviewItem, SyncPreviewResult, SyncProgress, SyncRunStatus, VideoMetadata, VideoVariant
 from video2local.resolvers import KukutoolResolver, NativeDouyinResolver, ResolverChain
 from video2local.sync_engine import SyncEngine, SyncSummary
 
@@ -24,12 +25,12 @@ class AppRuntime:
         self.browser_session = ChromeRemoteSession()
         self.signed_session = DouyinSignedSession()
         self.public_session = DouyinPublicSession()
+        self.resolver_sources = tuple(self.settings.share_resolvers.enabled_sources)
         self.share_resolver = self._build_share_resolver_chain()
         self.last_progress: SyncProgress | None = None
         self.output_root = self.settings.paths.downloads_dir
         self.sync_limit: int | None = None
         self.retry_count: int = 1
-        self.quality_strategy = SyncQualityStrategy.BEST_AVAILABLE
         self.flat_output = False
         self._latest_sync_run: dict | None = None
         self.archive_manager = ArchiveManager(self.settings.paths.downloads_dir)
@@ -62,8 +63,12 @@ class AppRuntime:
             return
         self.retry_count = retry_count
 
-    def set_quality_strategy(self, strategy: str) -> None:
-        self.quality_strategy = SyncQualityStrategy(strategy)
+    def set_resolver_sources(self, sources: tuple[str, ...]) -> None:
+        normalized = tuple(dict.fromkeys(item for item in sources if item))
+        if not normalized:
+            raise ValueError("至少保留一个解析来源")
+        self.resolver_sources = normalized
+        self.share_resolver = self._build_share_resolver_chain()
 
     def launch_chrome(self) -> None:
         self.ensure_directories()
@@ -128,13 +133,16 @@ class AppRuntime:
     def preview_sync(self) -> SyncPreviewResult:
         source = self.get_current_source()
         cookies_path = self.browser_session.export_cookies(self.settings.paths.data_dir / "yt-dlp-cookies.txt")
+        candidate_urls = self._collect_candidate_urls()
+        kukutool_resolutions = self._resolve_kukutool_preview_candidates(candidate_urls)
         items: list[SyncPreviewItem] = []
         seen_video_keys: set[tuple[str, str]] = set()
-        for url in self._collect_candidate_urls():
+        for url in candidate_urls:
             preview_item = self._build_preview_item(
                 page_url=url,
                 source=source,
                 cookies_path=cookies_path,
+                kukutool_resolution=kukutool_resolutions.get(url),
             )
             video_key = (preview_item.metadata.platform, preview_item.metadata.video_id)
             if video_key in seen_video_keys:
@@ -144,6 +152,17 @@ class AppRuntime:
         if not items:
             raise RuntimeError("当前页面未发现可下载视频，请确认已登录，并等待作品或收藏列表加载完成后再试。")
         return SyncPreviewResult(source=source, items=items)
+
+    def _resolve_kukutool_preview_candidates(self, candidate_urls: list[str]) -> dict[str, object]:
+        if "kukutool" not in self.resolver_sources or not self.settings.share_resolvers.enable_kukutool_fallback:
+            return {}
+        resolver = next(
+            (item for item in self.share_resolver.resolvers if isinstance(item, KukutoolResolver)),
+            None,
+        )
+        if resolver is None:
+            return {}
+        return resolver.resolve_variants_only_many(candidate_urls)
 
     def stop_sync(self) -> None:
         self.sync_engine.request_stop()
@@ -317,16 +336,19 @@ class AppRuntime:
         page_url: str,
         source: SourceDescriptor,
         cookies_path: Path,
+        kukutool_resolution: object | None = None,
     ) -> SyncPreviewItem:
         if source.platform == "douyin":
-            metadata, provider_id, selected_variant = self._resolve_douyin_sync_metadata(
+            metadata, provider_summary, variant_summary, selected_variant = self._resolve_douyin_sync_metadata(
                 page_url=page_url,
                 source_type=source.source_type,
                 cookies_path=cookies_path,
+                kukutool_resolution=kukutool_resolution,
             )
             return SyncPreviewItem(
-                provider_id=provider_id,
                 metadata=metadata,
+                provider_summary=provider_summary,
+                variant_summary=variant_summary,
                 selected_quality_label=None if selected_variant is None else selected_variant.quality_label,
                 selected_file_size=None if selected_variant is None else selected_variant.file_size,
             )
@@ -338,8 +360,9 @@ class AppRuntime:
             cookies_file=cookies_path,
         )
         return SyncPreviewItem(
-            provider_id="native",
             metadata=metadata,
+            provider_summary="native",
+            variant_summary="",
             selected_quality_label=None,
             selected_file_size=None,
         )
@@ -350,69 +373,124 @@ class AppRuntime:
         page_url: str,
         source_type: SourceType,
         cookies_path: Path,
-    ) -> tuple[VideoMetadata, str, VideoVariant | None]:
-        if self.settings.share_resolvers.enable_kukutool_fallback:
+        kukutool_resolution: object | None = None,
+    ) -> tuple[VideoMetadata, str, str, VideoVariant | None]:
+        metadata: VideoMetadata | None = None
+        provider_labels: list[str] = []
+        merged_variants: list[VideoVariant] = []
+        resolver_errors: list[Exception] = []
+
+        if "kukutool" in self.resolver_sources and self.settings.share_resolvers.enable_kukutool_fallback:
             try:
-                resolution = self.share_resolver.resolve(page_url)
+                if isinstance(kukutool_resolution, Exception):
+                    raise kukutool_resolution
+                resolution = kukutool_resolution or self._resolve_provider(
+                    "kukutool", page_url, attempts=1, variants_only=True
+                )
                 metadata = self.adapter.parse_aweme_detail(
                     resolution.payload,
                     source_type=source_type,
                     page_url=resolution.canonical_url,
                 )
-                variants = self.adapter.parse_share_variants(resolution.payload)
-                selected_variant = self._select_sync_variant(variants)
-                if selected_variant is not None:
-                    metadata = replace(metadata, download_url=selected_variant.download_url)
-                return metadata, resolution.provider_id, selected_variant
+                merged_variants.extend(self.adapter.parse_share_variants(resolution.payload))
+                provider_labels.append(resolution.provider_id)
+            except Exception as exc:
+                resolver_errors.append(exc)
+                provider_labels.append("kukutool(失败)")
+
+        if "native" in self.resolver_sources:
+            try:
+                detail_payload = self.browser_session.fetch_douyin_aweme_detail(page_url)
+                native_metadata = self.adapter.parse_aweme_detail(
+                    detail_payload,
+                    source_type=source_type,
+                    page_url=page_url,
+                )
+                metadata = native_metadata
+                merged_variants.extend(self.adapter.parse_share_variants(detail_payload))
+                if "native" not in provider_labels:
+                    provider_labels.append("native")
             except Exception:
-                pass
-        try:
-            detail_payload = self.browser_session.fetch_douyin_aweme_detail(page_url)
-            metadata = self.adapter.parse_aweme_detail(
-                detail_payload,
-                source_type=source_type,
-                page_url=page_url,
-            )
-            variants = self.adapter.parse_share_variants(detail_payload)
-            selected_variant = self._select_sync_variant(variants)
-            if selected_variant is not None:
-                metadata = replace(metadata, download_url=selected_variant.download_url)
-            return metadata, "native", selected_variant
-        except Exception:
-            metadata = self.downloader.probe_metadata(
-                url=page_url,
-                platform="douyin",
-                source_type=source_type,
-                cookies_from_browser="chrome",
-                cookies_file=cookies_path,
-            )
-            return metadata, "native", None
+                if metadata is None:
+                    metadata = self.downloader.probe_metadata(
+                        url=page_url,
+                        platform="douyin",
+                        source_type=source_type,
+                        cookies_from_browser="chrome",
+                        cookies_file=cookies_path,
+                    )
+                    provider_labels.append("native")
+        if metadata is None:
+            if resolver_errors:
+                raise RuntimeError(
+                    "已选解析来源未返回可用结果: " + "; ".join(str(error) for error in resolver_errors)
+                ) from resolver_errors[-1]
+            raise RuntimeError("已选解析来源未返回可用结果")
+
+        selected_variant = self._select_sync_variant(self._merge_sync_variants(merged_variants))
+        if selected_variant is not None:
+            metadata = replace(metadata, download_url=selected_variant.download_url)
+        provider_summary = " + ".join(provider_labels) if provider_labels else "native"
+        variant_summary = self._build_variant_summary(self._merge_sync_variants(merged_variants))
+        return metadata, provider_summary, variant_summary, selected_variant
+
+    def _resolve_provider(
+        self,
+        provider_id: str,
+        page_url: str,
+        *,
+        attempts: int,
+        variants_only: bool = False,
+    ) -> object:
+        resolver = next(
+            (
+                item
+                for item in self.share_resolver.resolvers
+                if getattr(item, "provider_id", None) == provider_id
+            ),
+            None,
+        )
+        if resolver is None:
+            raise RuntimeError(f"未启用解析来源: {provider_id}")
+
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                if variants_only:
+                    resolve_variants_only = getattr(resolver, "resolve_variants_only", None)
+                    if resolve_variants_only is not None:
+                        return resolve_variants_only(page_url)
+                return resolver.resolve(page_url)
+            except Exception as exc:
+                last_error = exc
+                if attempt + 1 < attempts:
+                    # Keep third-party parsing serial and give transient service limits time to recover.
+                    time.sleep(1)
+        assert last_error is not None
+        raise last_error
 
     def _build_share_resolver_chain(self) -> ResolverChain:
-        if self.settings.share_resolvers.enable_kukutool_fallback:
-            resolvers: list[object] = [
+        resolvers: list[object] = []
+        if "kukutool" in self.resolver_sources and self.settings.share_resolvers.enable_kukutool_fallback:
+            resolvers.append(
                 KukutoolResolver(
                     settings=self.settings,
                     kukutool_session=KukutoolSession(
-                        user_data_dir=self.settings.paths.chrome_profile_dir / "kukutool-profile",
+                        host=self.browser_session.host,
+                        port=self.browser_session.port,
                     ),
                     signed_session=self.signed_session,
                     public_session=self.public_session,
-                ),
+                )
+            )
+        if "native" in self.resolver_sources:
+            resolvers.append(
                 NativeDouyinResolver(
                     settings=self.settings,
                     signed_session=self.signed_session,
                     public_session=self.public_session,
-                ),
-            ]
-            return ResolverChain(resolvers)
-        resolvers = [
-            NativeDouyinResolver(
-                settings=self.settings,
-                signed_session=self.signed_session,
-                public_session=self.public_session,
+                )
             )
-        ]
         return ResolverChain(resolvers)
 
     def _safe_file_size(self, local_path: str) -> int | None:
@@ -424,16 +502,30 @@ class AppRuntime:
     def _select_sync_variant(self, variants: list[VideoVariant]) -> VideoVariant | None:
         if not variants:
             return None
-        if self.quality_strategy == SyncQualityStrategy.BEST_AVAILABLE:
-            return variants[0]
-        if self.quality_strategy == SyncQualityStrategy.PREFER_ULTRA:
-            for variant in variants:
-                if variant.quality_label == "超高清":
-                    return variant
-            return variants[0]
-        if self.quality_strategy == SyncQualityStrategy.PREFER_1080P:
-            for variant in variants:
-                if variant.quality_label == "1080p":
-                    return variant
-            return variants[0]
         return variants[0]
+
+    def _merge_sync_variants(self, variants: list[VideoVariant]) -> list[VideoVariant]:
+        deduped: dict[str, VideoVariant] = {}
+        for variant in variants:
+            existing = deduped.get(variant.quality_label)
+            if existing is None or self.adapter._variant_priority(variant) > self.adapter._variant_priority(existing):
+                deduped[variant.quality_label] = variant
+        merged = list(deduped.values())
+        merged.sort(
+            key=lambda item: (
+                self.adapter._quality_rank(item.quality_label),
+                item.bit_rate or 0,
+                item.file_size or 0,
+            ),
+            reverse=True,
+        )
+        return merged
+
+    def _build_variant_summary(self, variants: list[VideoVariant]) -> str:
+        parts: list[str] = []
+        for variant in variants:
+            if variant.file_size is None:
+                parts.append(variant.quality_label)
+                continue
+            parts.append(f"{variant.quality_label}({variant.file_size / 1024 / 1024:.2f} MB)")
+        return ", ".join(parts)

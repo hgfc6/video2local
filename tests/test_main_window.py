@@ -38,6 +38,9 @@ def test_main_window_builds_buttons_and_status_label() -> None:
     assert window.output_dir_input.text() != ""
     assert window.output_dir_button.text() == "选择目录"
     assert window.limit_input.placeholderText() == "全部"
+    assert not hasattr(window, "quality_strategy_input")
+    assert window.native_resolver_checkbox.isChecked() is True
+    assert window.kukutool_resolver_checkbox.isChecked() is True
     assert window.share_input.placeholderText() == "粘贴抖音分享文案或分享链接"
     assert window.parse_share_button.text() == "解析分享链接"
     assert window.download_share_button.text() == "下载所选版本"
@@ -174,6 +177,90 @@ def test_main_window_downloads_checked_share_variant() -> None:
     controller.wait_for_sync(timeout=1.0)
 
     assert engine.downloaded_variant_id == "ultra_1"
+
+    window.close()
+    app.quit()
+
+
+def test_main_window_uses_shared_results_table_for_sync_preview() -> None:
+    app = QApplication.instance() or QApplication([])
+
+    class PreviewEngine(FakeEngine):
+        def preview_sync(self):
+            return type("PreviewResult", (), {
+                "source": type("Source", (), {"platform": "douyin", "source_type": type("SourceType", (), {"value": "favorites"})()})(),
+                "items": [
+                    type("PreviewItem", (), {
+                        "metadata": type("Metadata", (), {
+                            "video_id": "735001",
+                            "title": "海边夜景",
+                            "author_name": "作者甲",
+                        })(),
+                        "provider_summary": "kukutool + native",
+                        "variant_summary": "超高清(64.67 MB), 2160p(5.16 MB), 1080p(3.64 MB)",
+                        "selected_quality_label": "超高清",
+                        "selected_file_size": 67819321,
+                    })()
+                ],
+            })()
+
+    controller = MainController(engine=PreviewEngine())
+    window = MainWindow(controller)
+
+    controller.preview_sync()
+    controller.wait_for_sync(timeout=1.0)
+    window.refresh_labels()
+
+    headers = [window.results_table.horizontalHeaderItem(index).text() for index in range(window.results_table.columnCount())]
+    assert headers == ["作者", "标题", "视频ID", "解析来源", "可用版本", "默认下载"]
+    assert window.results_table.item(0, 3).text() == "kukutool + native"
+    assert "2160p" in window.results_table.item(0, 4).text()
+    assert window.results_table.item(0, 5).text() == "超高清"
+
+    window.close()
+    app.quit()
+
+
+def test_main_window_rebuilds_shared_table_when_share_parse_follows_sync_preview() -> None:
+    app = QApplication.instance() or QApplication([])
+
+    class MixedFlowEngine(FakeEngine):
+        def parse_share_text(self, raw_text: str):
+            return type("ParseResult", (), {
+                "provider_id": "native",
+                "metadata": type("Metadata", (), {
+                    "video_id": "7651428709099242127",
+                    "title": "单链接视频",
+                    "author_name": "单链接作者",
+                })(),
+                "variants": [
+                    type("Variant", (), {
+                        "variant_id": "1080_1",
+                        "quality_label": "1080p",
+                        "codec_label": "H.264",
+                        "bit_rate": 3609000,
+                        "file_size": 3640000,
+                        "is_recommended": True,
+                    })(),
+                ],
+            })()
+
+    controller = MainController(engine=MixedFlowEngine())
+    window = MainWindow(controller)
+
+    controller.preview_sync()
+    controller.wait_for_sync(timeout=1.0)
+    window.refresh_labels()
+    controller.parse_share_text("https://v.douyin.com/5MF6Y_tP8nk/")
+    controller.wait_for_sync(timeout=1.0)
+    window.refresh_labels()
+
+    headers = [window.results_table.horizontalHeaderItem(index).text() for index in range(window.results_table.columnCount())]
+    assert headers == ["选择", "清晰度", "编码", "码率", "大小", "推荐"]
+    assert window.results_table.rowCount() == 1
+    assert window.results_table.item(0, 0).flags() & Qt.ItemIsUserCheckable
+    assert window.results_table.item(0, 0).text() == ""
+    assert window.results_table.item(0, 1).text() == "1080p"
 
     window.close()
     app.quit()

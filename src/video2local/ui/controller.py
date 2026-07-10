@@ -18,11 +18,12 @@ class MainController:
     share_variants: list[object] = field(default_factory=list)
     sync_preview_items: list[object] = field(default_factory=list)
     results_mode: str = "sync_preview"
+    results_revision: int = 0
     output_dir_text: str = ""
     sync_limit_text: str = ""
     retry_count_text: str = "1"
-    quality_strategy_text: str = "best_available"
     flat_output_enabled: bool = False
+    resolver_sources: tuple[str, ...] = ("native", "kukutool")
 
     def __post_init__(self) -> None:
         self._lock = Lock()
@@ -32,6 +33,9 @@ class MainController:
             self.output_dir_text = str(output_root)
         else:
             self.output_dir_text = str(Path.cwd())
+        configured_sources = getattr(self.engine, "resolver_sources", None)
+        if configured_sources:
+            self.resolver_sources = tuple(configured_sources)
 
     def launch_chrome(self) -> None:
         if hasattr(self.engine, "launch_chrome"):
@@ -163,15 +167,18 @@ class MainController:
         if hasattr(self.engine, "set_retry_count"):
             self.engine.set_retry_count(retry_count)
 
-    def set_quality_strategy(self, strategy: str) -> None:
-        self.quality_strategy_text = strategy
-        if hasattr(self.engine, "set_quality_strategy"):
-            self.engine.set_quality_strategy(strategy)
-
     def set_flat_output(self, enabled: bool) -> None:
         self.flat_output_enabled = enabled
         if hasattr(self.engine, "set_flat_output"):
             self.engine.set_flat_output(enabled)
+
+    def set_resolver_sources(self, sources: tuple[str, ...]) -> None:
+        normalized = tuple(dict.fromkeys(item for item in sources if item))
+        if not normalized:
+            raise ValueError("至少保留一个解析来源")
+        self.resolver_sources = normalized
+        if hasattr(self.engine, "set_resolver_sources"):
+            self.engine.set_resolver_sources(normalized)
 
     def wait_for_sync(self, timeout: float | None = None) -> None:
         worker = self._worker
@@ -266,6 +273,7 @@ class MainController:
             self.share_parse_result = result
             self.share_variants = variants
             self.results_mode = "share_parse"
+            self.results_revision += 1
             self.status_text = "分享链接解析完成"
             self.source_text = f"解析来源: {provider_id}"
             self.detail_text = f"{metadata.author_name} / {metadata.title or metadata.video_id}"
@@ -299,12 +307,14 @@ class MainController:
         with self._lock:
             self.sync_preview_items = items
             self.results_mode = "sync_preview"
+            self.results_revision += 1
             self.status_text = "预览完成"
             self.detail_text = f"{source.platform} / {source.source_type.value}，共预览 {len(items)} 条"
             if items:
                 first_item = items[0]
                 metadata = getattr(first_item, "metadata")
                 quality_label = getattr(first_item, "selected_quality_label", None) or "未知"
-                self.summary_text = f"首条预览: {metadata.author_name} / {metadata.title or metadata.video_id} / {quality_label}"
+                provider_summary = getattr(first_item, "provider_summary", "-")
+                self.summary_text = f"首条预览: {metadata.author_name} / {metadata.title or metadata.video_id} / {provider_summary} / {quality_label}"
             else:
                 self.summary_text = "当前预览为空"

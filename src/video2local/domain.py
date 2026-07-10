@@ -19,12 +19,6 @@ class SyncRunStatus(StrEnum):
     FAILED = "failed"
 
 
-class SyncQualityStrategy(StrEnum):
-    BEST_AVAILABLE = "best_available"
-    PREFER_ULTRA = "prefer_ultra"
-    PREFER_1080P = "prefer_1080p"
-
-
 @dataclass(frozen=True)
 class VideoMetadata:
     platform: str
@@ -86,8 +80,9 @@ class ShareVariantDownloadResult:
 
 @dataclass(frozen=True)
 class SyncPreviewItem:
-    provider_id: str
     metadata: VideoMetadata
+    provider_summary: str
+    variant_summary: str
     selected_quality_label: str | None
     selected_file_size: int | None
 

@@ -84,6 +84,46 @@ class KukutoolResolver:
             payload=payload,
         )
 
+    def resolve_variants_only(self, share_url: str) -> SharePayloadResolution:
+        """Fetch third-party variants without duplicating native metadata requests."""
+        kukutool_payload = self.kukutool_session.parse_share_url(
+            share_url,
+            base_url=self.settings.share_resolvers.kukutool_base_url,
+        )
+        return self._build_variants_only_resolution(share_url, kukutool_payload)
+
+    def resolve_variants_only_many(
+        self,
+        share_urls: list[str],
+    ) -> dict[str, SharePayloadResolution | Exception]:
+        results: dict[str, SharePayloadResolution | Exception] = {}
+        for share_url, payload in zip(
+            share_urls,
+            self.kukutool_session.parse_share_urls(
+                share_urls,
+                base_url=self.settings.share_resolvers.kukutool_base_url,
+            ),
+            strict=True,
+        ):
+            if isinstance(payload, Exception):
+                results[share_url] = payload
+                continue
+            results[share_url] = self._build_variants_only_resolution(share_url, payload)
+        return results
+
+    def _build_variants_only_resolution(self, share_url: str, kukutool_payload: dict) -> SharePayloadResolution:
+        payload = self._build_placeholder_payload(
+            share_url=share_url,
+            canonical_url=share_url,
+            kukutool_payload=kukutool_payload,
+        )
+        return SharePayloadResolution(
+            provider_id=self.provider_id,
+            source_url=share_url,
+            canonical_url=share_url,
+            payload=payload,
+        )
+
     def _merge_payloads(
         self,
         *,

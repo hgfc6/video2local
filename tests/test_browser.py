@@ -3,7 +3,7 @@ import json
 from unittest.mock import patch
 import asyncio
 
-from video2local.browser import ChromeLaunchSpec, ChromeRemoteSession, DouyinSignedSession, write_netscape_cookies
+from video2local.browser import ChromeLaunchSpec, ChromeRemoteSession, DouyinSignedSession, KukutoolSession, write_netscape_cookies
 
 
 def test_chrome_launch_args_use_dedicated_profile_and_remote_debugging_port(tmp_path: Path) -> None:
@@ -22,6 +22,30 @@ def test_chrome_launch_args_use_dedicated_profile_and_remote_debugging_port(tmp_
         "--new-window",
         "about:blank",
     ]
+
+
+def test_kukutool_quality_button_parser_extracts_size_and_label() -> None:
+    variant = KukutoolSession._parse_quality_button_text("下载 超高清 (64.7MB)")
+
+    assert variant == {"type": "超高清", "size": int(64.7 * 1024 * 1024)}
+
+
+def test_kukutool_quality_button_parser_accepts_kukutool_compact_button_text() -> None:
+    variant = KukutoolSession._parse_quality_button_text("下载超高清 (7.0MB)")
+
+    assert variant == {"type": "超高清", "size": 7 * 1024 * 1024}
+
+
+def test_kukutool_quality_button_parser_ignores_unrelated_buttons() -> None:
+    assert KukutoolSession._parse_quality_button_text("下载无水印视频") is None
+
+
+def test_kukutool_quality_button_parser_accepts_button_text_with_line_breaks() -> None:
+    variant = KukutoolSession._parse_quality_button_text("下载\n720p (2.6MB)".replace("\n", " "))
+
+    assert variant == {"type": "720p", "size": int(2.6 * 1024 * 1024)}
+
+
 
 
 def test_detect_finds_chrome_on_path(tmp_path: Path) -> None:

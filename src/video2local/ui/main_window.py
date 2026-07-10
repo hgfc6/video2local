@@ -1,7 +1,6 @@
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
-    QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -28,6 +27,7 @@ class MainWindow(QMainWindow):
     def __init__(self, controller: MainController) -> None:
         super().__init__()
         self.controller = controller
+        self._rendered_results_revision = -1
         self.setWindowTitle("Video2Local")
         self.resize(1240, 780)
         self.setStyleSheet(
@@ -63,13 +63,6 @@ class MainWindow(QMainWindow):
                 border-radius: 12px;
                 padding: 9px 12px;
                 min-height: 18px;
-            }
-            QComboBox {
-                background: white;
-                border: 1px solid #d8d0bf;
-                border-radius: 12px;
-                padding: 6px 10px;
-                min-height: 22px;
             }
             QTableWidget {
                 background: white;
@@ -158,11 +151,10 @@ class MainWindow(QMainWindow):
         self.limit_input.setPlaceholderText("全部")
         self.retry_input = QLineEdit(self.controller.retry_count_text)
         self.retry_input.setPlaceholderText("1")
-        self.quality_strategy_input = QComboBox()
-        self.quality_strategy_input.addItem("最高可用", "best_available")
-        self.quality_strategy_input.addItem("优先超高清", "prefer_ultra")
-        self.quality_strategy_input.addItem("优先1080p", "prefer_1080p")
-        self.quality_strategy_input.setCurrentIndex(0)
+        self.native_resolver_checkbox = QCheckBox("站内解析 (native)")
+        self.native_resolver_checkbox.setChecked("native" in self.controller.resolver_sources)
+        self.kukutool_resolver_checkbox = QCheckBox("第三方解析 (kukutool)")
+        self.kukutool_resolver_checkbox.setChecked("kukutool" in self.controller.resolver_sources)
         self.share_input = QLineEdit()
         self.share_input.setPlaceholderText("粘贴抖音分享文案或分享链接")
         self.parse_share_button = QPushButton("解析分享链接")
@@ -239,9 +231,13 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(QLabel("前 N 个视频"), 2, 0)
         settings_layout.addWidget(self.limit_input, 2, 1)
         settings_layout.addWidget(QLabel("留空表示下载当前页面全部可见视频"), 2, 2)
-        settings_layout.addWidget(QLabel("清晰度策略"), 3, 0)
-        settings_layout.addWidget(self.quality_strategy_input, 3, 1)
-        settings_layout.addWidget(QLabel("最高可用 / 优先超高清 / 优先1080p"), 3, 2)
+        settings_layout.addWidget(QLabel("解析来源"), 3, 0)
+        resolver_row = QHBoxLayout()
+        resolver_row.setSpacing(12)
+        resolver_row.addWidget(self.native_resolver_checkbox)
+        resolver_row.addWidget(self.kukutool_resolver_checkbox)
+        resolver_row.addStretch(1)
+        settings_layout.addLayout(resolver_row, 3, 1, 1, 2)
         settings_layout.addWidget(QLabel("失败重试"), 4, 0)
         settings_layout.addWidget(self.retry_input, 4, 1)
         settings_layout.addWidget(QLabel("串行重试次数，建议 0-2"), 4, 2)
@@ -417,7 +413,12 @@ class MainWindow(QMainWindow):
             self.controller.set_flat_output(self.flat_output_checkbox.isChecked())
             self.controller.set_sync_limit(self.limit_input.text())
             self.controller.set_retry_count(self.retry_input.text())
-            self.controller.set_quality_strategy(self.quality_strategy_input.currentData())
+            resolver_sources: list[str] = []
+            if self.native_resolver_checkbox.isChecked():
+                resolver_sources.append("native")
+            if self.kukutool_resolver_checkbox.isChecked():
+                resolver_sources.append("kukutool")
+            self.controller.set_resolver_sources(tuple(resolver_sources))
         except ValueError as exc:
             self.controller.status_text = f"错误: {exc}"
             self.controller.detail_text = "请修正下载设置后重试"
@@ -434,6 +435,10 @@ class MainWindow(QMainWindow):
         self.refresh_results_table()
 
     def refresh_results_table(self) -> None:
+        if self._rendered_results_revision != self.controller.results_revision:
+            self.results_table.clearContents()
+            self.results_table.setRowCount(0)
+            self._rendered_results_revision = self.controller.results_revision
         if self.controller.results_mode == "share_parse":
             self._configure_results_table_for_share_variants()
             self._refresh_share_results_rows()
@@ -453,12 +458,12 @@ class MainWindow(QMainWindow):
 
     def _configure_results_table_for_sync_preview(self) -> None:
         self.results_table.setColumnCount(6)
-        self.results_table.setHorizontalHeaderLabels(["作者", "标题", "视频ID", "来源", "预计清晰度", "预计大小"])
+        self.results_table.setHorizontalHeaderLabels(["作者", "标题", "视频ID", "解析来源", "可用版本", "默认下载"])
         self.results_table.setColumnWidth(0, 140)
         self.results_table.setColumnWidth(1, 280)
         self.results_table.setColumnWidth(2, 180)
-        self.results_table.setColumnWidth(3, 110)
-        self.results_table.setColumnWidth(4, 140)
+        self.results_table.setColumnWidth(3, 140)
+        self.results_table.setColumnWidth(4, 380)
         self.results_table.setColumnWidth(5, 140)
 
     def _refresh_share_results_rows(self) -> None:
@@ -484,13 +489,12 @@ class MainWindow(QMainWindow):
         self.results_table.setRowCount(len(items))
         for row, item in enumerate(items):
             metadata = getattr(item, "metadata")
-            file_size = getattr(item, "selected_file_size", None)
             self.results_table.setItem(row, 0, QTableWidgetItem(getattr(metadata, "author_name", "")))
             self.results_table.setItem(row, 1, QTableWidgetItem(getattr(metadata, "title", "") or getattr(metadata, "video_id", "")))
             self.results_table.setItem(row, 2, QTableWidgetItem(getattr(metadata, "video_id", "")))
-            self.results_table.setItem(row, 3, QTableWidgetItem(getattr(item, "provider_id", "")))
-            self.results_table.setItem(row, 4, QTableWidgetItem(getattr(item, "selected_quality_label", "") or ""))
-            self.results_table.setItem(row, 5, QTableWidgetItem("" if file_size is None else f"{file_size / 1024 / 1024:.2f} MB"))
+            self.results_table.setItem(row, 3, QTableWidgetItem(getattr(item, "provider_summary", "")))
+            self.results_table.setItem(row, 4, QTableWidgetItem(getattr(item, "variant_summary", "")))
+            self.results_table.setItem(row, 5, QTableWidgetItem(getattr(item, "selected_quality_label", "") or ""))
 
     def _checked_share_variant_row(self) -> int:
         for row in range(self.results_table.rowCount()):

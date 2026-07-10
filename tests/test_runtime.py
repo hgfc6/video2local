@@ -10,6 +10,10 @@ from video2local.resolvers import KukutoolResolver, NativeDouyinResolver
 from video2local.sync_engine import SyncSummary
 
 
+def kukutool_resolver_for(runtime: AppRuntime) -> KukutoolResolver:
+    return next(item for item in runtime.share_resolver.resolvers if isinstance(item, KukutoolResolver))
+
+
 def test_launch_chrome_creates_directories_and_starts_process(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     runtime = AppRuntime(settings=settings)
@@ -52,6 +56,43 @@ def test_runtime_prefers_kukutool_resolver_when_enabled(tmp_path: Path) -> None:
     runtime = AppRuntime(settings=settings)
 
     assert [type(item) for item in runtime.share_resolver.resolvers] == [KukutoolResolver, NativeDouyinResolver]
+
+
+def test_runtime_can_use_native_resolver_only_when_configured(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    settings = AppSettings(
+        platform_name=settings.platform_name,
+        supported_source_types=settings.supported_source_types,
+        paths=settings.paths,
+        share_resolvers=settings.share_resolvers.__class__(
+            enable_kukutool_fallback=True,
+            kukutool_base_url=settings.share_resolvers.kukutool_base_url,
+            enabled_sources=("native",),
+        ),
+    )
+
+    runtime = AppRuntime(settings=settings)
+
+    assert [type(item) for item in runtime.share_resolver.resolvers] == [NativeDouyinResolver]
+
+
+def test_runtime_can_switch_to_kukutool_only_at_runtime(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    settings = AppSettings(
+        platform_name=settings.platform_name,
+        supported_source_types=settings.supported_source_types,
+        paths=settings.paths,
+        share_resolvers=settings.share_resolvers.__class__(
+            enable_kukutool_fallback=True,
+            kukutool_base_url=settings.share_resolvers.kukutool_base_url,
+            enabled_sources=("native", "kukutool"),
+        ),
+    )
+    runtime = AppRuntime(settings=settings)
+
+    runtime.set_resolver_sources(("kukutool",))
+
+    assert [type(item) for item in runtime.share_resolver.resolvers] == [KukutoolResolver]
 
 
 def test_parse_share_text_prefers_kukutool_variants_when_enabled(tmp_path: Path) -> None:
@@ -260,6 +301,50 @@ def test_start_sync_uses_kukutool_share_resolver_sequentially_when_enabled(tmp_p
     cookies_path = tmp_path / "cookies.txt"
     resolved_urls: list[str] = []
     captured_items: list[VideoMetadata] = []
+    native_payload_1 = {
+        "aweme_detail": {
+            "aweme_id": "735001",
+            "desc": "title-735001",
+            "author": {"nickname": "author-735001"},
+            "video": {
+                "bit_rate": [
+                    {
+                        "gear_name": "2160_1_1",
+                        "bit_rate": 5135000,
+                        "is_h265": 1,
+                        "play_addr": {
+                            "data_size": 5409478,
+                            "width": 2160,
+                            "height": 3840,
+                            "url_list": ["https://cdn.example.com/735001-2160.mp4"],
+                        },
+                    }
+                ]
+            },
+        }
+    }
+    native_payload_2 = {
+        "aweme_detail": {
+            "aweme_id": "735002",
+            "desc": "title-735002",
+            "author": {"nickname": "author-735002"},
+            "video": {
+                "bit_rate": [
+                    {
+                        "gear_name": "2160_1_1",
+                        "bit_rate": 5135000,
+                        "is_h265": 1,
+                        "play_addr": {
+                            "data_size": 5409478,
+                            "width": 2160,
+                            "height": 3840,
+                            "url_list": ["https://cdn.example.com/735002-2160.mp4"],
+                        },
+                    }
+                ]
+            },
+        }
+    }
 
     def fake_resolve(url: str):
         resolved_urls.append(url)
@@ -295,8 +380,11 @@ def test_start_sync_uses_kukutool_share_resolver_sequentially_when_enabled(tmp_p
     with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
         with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=html_snapshots):
             with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
-                with patch.object(runtime.share_resolver, "resolve", side_effect=fake_resolve) as resolve_mock:
-                    with patch("video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail") as detail_mock:
+                with patch.object(kukutool_resolver_for(runtime), "resolve_variants_only", side_effect=fake_resolve) as resolve_mock:
+                    with patch(
+                        "video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail",
+                        side_effect=[native_payload_1, native_payload_2],
+                    ) as detail_mock:
                         with patch.object(runtime.downloader, "probe_metadata") as probe_mock:
                             def fake_sync_items(items, progress_callback=None, cookies_file=None, retry_count=0, report_dir=None, discovered_count=None):
                                 captured_items.extend(list(items))
@@ -310,14 +398,14 @@ def test_start_sync_uses_kukutool_share_resolver_sequentially_when_enabled(tmp_p
         "https://www.douyin.com/video/735001",
         "https://www.douyin.com/video/735002",
     ]
-    detail_mock.assert_not_called()
+    assert detail_mock.call_count == 2
     probe_mock.assert_not_called()
     assert [item.video_id for item in captured_items] == ["735001", "735002"]
     assert captured_items[0].download_url == "https://cdn.example.com/735001-ultra.mp4"
     assert captured_items[1].download_url == "https://cdn.example.com/735002-ultra.mp4"
 
 
-def test_start_sync_respects_prefer_1080_quality_strategy(tmp_path: Path) -> None:
+def test_start_sync_uses_merged_best_variant_without_quality_strategy_override(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     settings = AppSettings(
         platform_name=settings.platform_name,
@@ -329,7 +417,6 @@ def test_start_sync_respects_prefer_1080_quality_strategy(tmp_path: Path) -> Non
         ),
     )
     runtime = AppRuntime(settings=settings)
-    runtime.set_quality_strategy("prefer_1080p")
     summary = SyncSummary(discovered_count=1, downloaded_count=1, skipped_count=0, failed_count=0)
     cookies_path = tmp_path / "cookies.txt"
     captured_items: list[VideoMetadata] = []
@@ -349,6 +436,19 @@ def test_start_sync_respects_prefer_1080_quality_strategy(tmp_path: Path) -> Non
                             {"type": "1080p", "size": 3819934, "url": "https://cdn.example.com/735001-1080.mp4"},
                             {"type": "超高清", "size": 67819321, "url": "https://cdn.example.com/735001-ultra.mp4"},
                         ],
+                        "bit_rate": [
+                            {
+                                "gear_name": "2160_1_1",
+                                "bit_rate": 5135000,
+                                "is_h265": 1,
+                                "play_addr": {
+                                    "data_size": 5409478,
+                                    "width": 2160,
+                                    "height": 3840,
+                                    "url_list": ["https://cdn.example.com/735001-2160.mp4"],
+                                },
+                            }
+                        ],
                         "play_addr": {"url_list": ["https://cdn.example.com/735001-ultra.mp4"]},
                     },
                 }
@@ -358,7 +458,7 @@ def test_start_sync_respects_prefer_1080_quality_strategy(tmp_path: Path) -> Non
     with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
         with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/735001">video</a>']):
                 with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
-                    with patch.object(runtime.share_resolver, "resolve", side_effect=fake_resolve):
+                    with patch.object(kukutool_resolver_for(runtime), "resolve_variants_only", side_effect=fake_resolve):
                         def fake_sync_items(items, progress_callback=None, cookies_file=None, retry_count=0, report_dir=None, discovered_count=None):
                             captured_items.extend(list(items))
                             return summary
@@ -366,10 +466,10 @@ def test_start_sync_respects_prefer_1080_quality_strategy(tmp_path: Path) -> Non
                         with patch.object(runtime.sync_engine, "sync_items", side_effect=fake_sync_items):
                             runtime.start_sync()
 
-    assert captured_items[0].download_url == "https://cdn.example.com/735001-1080.mp4"
+    assert captured_items[0].download_url == "https://cdn.example.com/735001-ultra.mp4"
 
 
-def test_preview_sync_returns_preview_rows_with_selected_quality(tmp_path: Path) -> None:
+def test_preview_sync_returns_merged_variant_summary(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     settings = AppSettings(
         platform_name=settings.platform_name,
@@ -382,6 +482,50 @@ def test_preview_sync_returns_preview_rows_with_selected_quality(tmp_path: Path)
     )
     runtime = AppRuntime(settings=settings)
     cookies_path = tmp_path / "cookies.txt"
+    native_payload_1 = {
+        "aweme_detail": {
+            "aweme_id": "735001",
+            "desc": "title-735001",
+            "author": {"nickname": "author-735001"},
+            "video": {
+                "bit_rate": [
+                    {
+                        "gear_name": "2160_1_1",
+                        "bit_rate": 5135000,
+                        "is_h265": 1,
+                        "play_addr": {
+                            "data_size": 5409478,
+                            "width": 2160,
+                            "height": 3840,
+                            "url_list": ["https://cdn.example.com/735001-2160.mp4"],
+                        },
+                    }
+                ]
+            },
+        }
+    }
+    native_payload_2 = {
+        "aweme_detail": {
+            "aweme_id": "735002",
+            "desc": "title-735002",
+            "author": {"nickname": "author-735002"},
+            "video": {
+                "bit_rate": [
+                    {
+                        "gear_name": "2160_1_1",
+                        "bit_rate": 5135000,
+                        "is_h265": 1,
+                        "play_addr": {
+                            "data_size": 5409478,
+                            "width": 2160,
+                            "height": 3840,
+                            "url_list": ["https://cdn.example.com/735002-2160.mp4"],
+                        },
+                    }
+                ]
+            },
+        }
+    }
 
     def fake_resolve(url: str):
         video_id = url.rsplit("/", 1)[-1]
@@ -396,8 +540,21 @@ def test_preview_sync_returns_preview_rows_with_selected_quality(tmp_path: Path)
                     "author": {"nickname": f"author-{video_id}"},
                     "video": {
                         "video_fullinfo": [
-                            {"type": "1080p", "size": 3819934, "url": f"https://cdn.example.com/{video_id}-1080.mp4"},
                             {"type": "超高清", "size": 67819321, "url": f"https://cdn.example.com/{video_id}-ultra.mp4"},
+                        ],
+                        "play_addr": {"url_list": [f"https://cdn.example.com/{video_id}-ultra.mp4"]},
+                        "bit_rate": [
+                            {
+                                "gear_name": "2160_1_1",
+                                "bit_rate": 5135000,
+                                "is_h265": 1,
+                                "play_addr": {
+                                    "data_size": 5409478,
+                                    "width": 2160,
+                                    "height": 3840,
+                                    "url_list": [f"https://cdn.example.com/{video_id}-2160.mp4"],
+                                },
+                            }
                         ],
                         "play_addr": {"url_list": [f"https://cdn.example.com/{video_id}-ultra.mp4"]},
                     },
@@ -408,14 +565,116 @@ def test_preview_sync_returns_preview_rows_with_selected_quality(tmp_path: Path)
     with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
         with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/735001">video</a><a href="/video/735002">video2</a>']):
             with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
-                with patch.object(runtime.share_resolver, "resolve", side_effect=fake_resolve):
-                    preview = runtime.preview_sync()
+                with patch.object(
+                    kukutool_resolver_for(runtime),
+                    "resolve_variants_only_many",
+                    side_effect=lambda urls: {url: fake_resolve(url) for url in urls},
+                ):
+                    with patch(
+                        "video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail",
+                        side_effect=[native_payload_1, native_payload_2],
+                    ):
+                        preview = runtime.preview_sync()
 
     assert preview.source.platform == "douyin"
     assert len(preview.items) == 2
-    assert preview.items[0].provider_id == "kukutool"
+    assert preview.items[0].provider_summary == "kukutool + native"
+    assert "超高清" in preview.items[0].variant_summary
+    assert "2160p" in preview.items[0].variant_summary
     assert preview.items[0].selected_quality_label == "超高清"
     assert preview.items[0].selected_file_size == 67819321
+    assert preview.items[0].metadata.author_name == "author-735001"
+
+
+def test_preview_sync_resolves_every_video_with_kukutool_directly(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    settings = AppSettings(
+        platform_name=settings.platform_name,
+        supported_source_types=settings.supported_source_types,
+        paths=settings.paths,
+        share_resolvers=settings.share_resolvers.__class__(
+            enable_kukutool_fallback=True,
+            kukutool_base_url=settings.share_resolvers.kukutool_base_url,
+            enabled_sources=("kukutool",),
+        ),
+    )
+    runtime = AppRuntime(settings=settings)
+    cookies_path = tmp_path / "cookies.txt"
+    resolved_urls: list[str] = []
+
+    def fake_kukutool_resolve(url: str):
+        resolved_urls.append(url)
+        video_id = url.rsplit("/", 1)[-1]
+        return type("Resolution", (), {
+            "provider_id": "kukutool",
+            "canonical_url": url,
+            "payload": {
+                "aweme_detail": {
+                    "aweme_id": video_id,
+                    "desc": f"title-{video_id}",
+                    "author": {"nickname": f"author-{video_id}"},
+                    "video": {
+                        "video_fullinfo": [
+                            {"type": "超高清", "size": 67819321, "url": f"https://cdn.example.com/{video_id}-ultra.mp4"},
+                        ],
+                        "play_addr": {"url_list": [f"https://cdn.example.com/{video_id}-ultra.mp4"]},
+                    },
+                },
+            },
+        })()
+
+    kukutool_resolver = next(item for item in runtime.share_resolver.resolvers if isinstance(item, KukutoolResolver))
+    with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
+        with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/735001">one</a><a href="/video/735002">two</a>']):
+            with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+                with patch.object(
+                    kukutool_resolver,
+                    "resolve_variants_only_many",
+                    side_effect=lambda urls: {url: fake_kukutool_resolve(url) for url in urls},
+                ) as resolve_many_mock:
+                    with patch("video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail") as native_mock:
+                        preview = runtime.preview_sync()
+
+    assert resolved_urls == [
+        "https://www.douyin.com/video/735001",
+        "https://www.douyin.com/video/735002",
+    ]
+    resolve_many_mock.assert_called_once()
+    assert [item.provider_summary for item in preview.items] == ["kukutool", "kukutool"]
+    assert all(item.selected_quality_label == "超高清" for item in preview.items)
+    native_mock.assert_not_called()
+
+
+def test_preview_sync_kukutool_only_does_not_silently_fall_back_to_native(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    settings = AppSettings(
+        platform_name=settings.platform_name,
+        supported_source_types=settings.supported_source_types,
+        paths=settings.paths,
+        share_resolvers=settings.share_resolvers.__class__(
+            enable_kukutool_fallback=True,
+            kukutool_base_url=settings.share_resolvers.kukutool_base_url,
+            enabled_sources=("kukutool",),
+        ),
+    )
+    runtime = AppRuntime(settings=settings)
+    cookies_path = tmp_path / "cookies.txt"
+    kukutool_resolver = next(item for item in runtime.share_resolver.resolvers if isinstance(item, KukutoolResolver))
+
+    with patch.object(kukutool_resolver, "resolve_variants_only", side_effect=RuntimeError("Kukutool limited")):
+        with patch("video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail") as native_mock:
+            try:
+                runtime._resolve_douyin_sync_metadata(
+                    page_url="https://www.douyin.com/video/735001",
+                    source_type=SourceType.FAVORITES,
+                    cookies_path=cookies_path,
+                )
+            except RuntimeError as exc:
+                assert "Kukutool" in str(exc)
+            else:
+                raise AssertionError("Kukutool-only failure must be reported")
+
+    native_mock.assert_not_called()
 
 
 def test_start_sync_passes_retry_and_report_dir_to_sync_engine(tmp_path: Path) -> None:
@@ -499,7 +758,7 @@ def test_start_sync_streams_douyin_items_without_pre_resolving_everything(tmp_pa
     with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
         with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/735001">video</a><a href="/video/735002">video2</a>']):
             with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
-                with patch.object(runtime.share_resolver, "resolve", side_effect=fake_resolve):
+                with patch.object(kukutool_resolver_for(runtime), "resolve_variants_only", side_effect=fake_resolve):
                     with patch.object(runtime.sync_engine, "sync_items", side_effect=fake_sync_items):
                         runtime.start_sync()
 
@@ -540,7 +799,7 @@ def test_start_sync_falls_back_to_existing_browser_pipeline_when_kukutool_resolu
     with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=favorite_collection"):
         with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/735001">video</a>']):
             with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
-                with patch.object(runtime.share_resolver, "resolve", side_effect=RuntimeError("kukutool limited")) as resolve_mock:
+                with patch.object(kukutool_resolver_for(runtime), "resolve_variants_only", side_effect=RuntimeError("kukutool limited")) as resolve_mock:
                     with patch("video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail", return_value=detail_payload) as detail_mock:
                         def fake_sync_items(items, progress_callback=None, cookies_file=None, retry_count=0, report_dir=None, discovered_count=None):
                             captured_items.extend(list(items))
@@ -549,7 +808,8 @@ def test_start_sync_falls_back_to_existing_browser_pipeline_when_kukutool_resolu
                         with patch.object(runtime.sync_engine, "sync_items", side_effect=fake_sync_items):
                             runtime.start_sync()
 
-    resolve_mock.assert_called_once_with("https://www.douyin.com/video/735001")
+    assert resolve_mock.call_count == 1
+    resolve_mock.assert_called_with("https://www.douyin.com/video/735001")
     detail_mock.assert_called_once_with("https://www.douyin.com/video/735001")
     assert len(captured_items) == 1
     assert captured_items[0].download_url == "https://cdn.example.com/native.mp4"

@@ -2,13 +2,14 @@ from dataclasses import dataclass
 import asyncio
 import inspect
 import json
-import hashlib
 import random
 from pathlib import Path
 import re
 import shutil
 import os
 import string
+import subprocess
+from urllib.parse import urlparse
 import time
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -22,10 +23,9 @@ COMMON_CHROME_PATHS = (
     Path(os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")),
 )
 VIDEO_ID_RE = re.compile(r"/video/(\d+)")
-KUKUTOOL_PARSE_MODULE_ID = 12255
-KUKUTOOL_DECRYPT_CHUNK_ID = 3052
-KUKUTOOL_DECRYPT_MODULE_ID = 83052
-KUKUTOOL_DECRYPT_KEY = "12345678901234567890123456789013"
+KUKUTOOL_QUALITY_BUTTON_RE = re.compile(
+    r"^下载\s*(?P<quality>.+?)\s*\((?P<size>[\d.]+)\s*(?P<unit>KB|MB|GB)\)$"
+)
 
 
 def write_netscape_cookies(output_path: Path, cookies: list[dict]) -> None:
@@ -419,114 +419,153 @@ class DouyinSignedSession(DouyinPublicSession):
 
 @dataclass(frozen=True)
 class KukutoolSession(DouyinPublicSession):
-    user_data_dir: Path | None = None
-    browser_channel: str = "chrome"
-    headless: bool = False
+    host: str = "127.0.0.1"
+    port: int = 9222
 
-    def _resolve_user_data_dir(self) -> Path:
-        if self.user_data_dir is not None:
-            return self.user_data_dir
-        digest = hashlib.sha1(str(Path.cwd()).encode("utf-8")).hexdigest()[:12]
-        return Path.cwd() / ".video2local" / f"kukutool-profile-{digest}"
+    async def _parse_loaded_page_async(self, page, share_url: str) -> dict:
+        clear_button = page.get_by_role("button", name="清除内容")
+        if await clear_button.count():
+            await clear_button.click()
+        text_box = page.get_by_role("textbox", name="粘贴带链接的文本")
+        await text_box.fill(share_url)
+        await page.get_by_role("button", name="开始解析").click()
+        await page.wait_for_timeout(300)
+        try:
+            await page.wait_for_function(
+                """() => [...document.querySelectorAll('button')]
+                    .some((button) => button.innerText.trim() === '处理中...' || button.disabled)""",
+                timeout=5000,
+            )
+            await page.wait_for_function(
+                """() => [...document.querySelectorAll('button')]
+                    .some((button) => button.innerText.trim() === '开始解析' && !button.disabled)""",
+                timeout=60000,
+            )
+        except PlaywrightTimeoutError as exc:
+            page_text = (await page.locator("body").inner_text()).strip()
+            raise RuntimeError(f"Kukutool 网页解析未完成: {page_text[-300:]}") from exc
 
-    @staticmethod
-    def _build_parse_params(share_url: str, page_path: str) -> dict[str, str]:
+        quality_buttons = page.locator("button")
+        button_texts = [" ".join(text.split()) for text in await quality_buttons.all_text_contents()]
+        if not any(self._parse_quality_button_text(text) is not None for text in button_texts):
+            raise RuntimeError("Kukutool 网页解析完成，但未返回可下载的清晰度")
+
+        entries: list[dict] = []
+        copied_values: list[str] = []
+        seen_qualities: set[str] = set()
+        button_texts = [" ".join(text.split()) for text in await quality_buttons.all_text_contents()]
+        for index, button_text in enumerate(button_texts):
+            variant = self._parse_quality_button_text(button_text)
+            if variant is None:
+                continue
+            quality_label = variant["type"]
+            if quality_label in seen_qualities:
+                continue
+            seen_qualities.add(quality_label)
+            copy_button = next(
+                (
+                    quality_buttons.nth(next_index)
+                    for next_index in range(index + 1, len(button_texts))
+                    if button_texts[next_index] == "复制"
+                ),
+                None,
+            )
+            if copy_button is None:
+                continue
+            await copy_button.click()
+            await page.wait_for_timeout(500)
+            download_url = await page.evaluate("navigator.clipboard.readText()")
+            if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
+                download_url = self._read_windows_clipboard()
+            copied_values.append(str(download_url))
+            if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
+                continue
+            entries.append({**variant, "url": download_url})
+        if not entries:
+            raise RuntimeError(
+                "Kukutool 网页未提供可复制的视频下载链接: "
+                + ", ".join(repr(value[:120]) for value in copied_values)
+            )
         return {
-            "requestURL": share_url,
-            "captchaKey": "",
-            "captchaInput": "",
-            "totalSuccessCount": "0",
-            "successCount": "0",
-            "firstSuccessDate": "",
-            "pagePath": page_path,
-            "uwx_id": "",
-            "isMobile": "false",
-            "geoipIp": "",
+            "url": entries[-1]["url"],
+            "videos": [{"url": entries[-1]["url"], "video_fullinfo": entries}],
         }
 
-    async def _parse_share_url_async(self, share_url: str, *, base_url: str) -> dict:
-        executable_path = self._resolve_executable_path()
-        user_data_dir = self._resolve_user_data_dir()
-        user_data_dir.mkdir(parents=True, exist_ok=True)
-        async with async_playwright() as playwright:
-            context = await playwright.chromium.launch_persistent_context(
-                str(user_data_dir),
-                executable_path=str(executable_path),
-                channel=self.browser_channel,
-                headless=self.headless,
-                args=["--disable-blink-features=AutomationControlled"],
+    @staticmethod
+    def _parse_quality_button_text(button_text: str) -> dict | None:
+        match = KUKUTOOL_QUALITY_BUTTON_RE.match(button_text.strip())
+        if match is None:
+            return None
+        size = float(match.group("size"))
+        unit = match.group("unit")
+        multiplier = {"KB": 1024, "MB": 1024 * 1024, "GB": 1024 * 1024 * 1024}[unit]
+        return {"type": match.group("quality"), "size": int(size * multiplier)}
+
+    @staticmethod
+    def _read_windows_clipboard() -> str:
+        """Kukutool's copy button writes to the system clipboard on Windows."""
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=5,
             )
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return result.stdout.strip() if result.returncode == 0 else ""
+
+    async def _parse_share_urls_async(self, share_urls: list[str], *, base_url: str) -> list[dict | Exception]:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.connect_over_cdp(f"http://{self.host}:{self.port}")
             try:
-                page = context.pages[0] if context.pages else await context.new_page()
-                await page.goto(base_url, wait_until="networkidle", timeout=60000)
-                result = await page.evaluate(
-                    """async ({ shareUrl, moduleId, decryptChunkId, decryptModuleId, decryptKey }) => {
-                        window.webpackChunk_N_E.push([[Symbol("video2local-kukutool")], {}, function(require) {
-                            window.__video2local_kukutool_require__ = require;
-                        }]);
-                        const requireFn = window.__video2local_kukutool_require__;
-                        const parseModule = requireFn(moduleId);
-                        const parseFn = parseModule && parseModule.p;
-                        if (!parseFn) {
-                            return { ok: false, error: "parse_module_missing" };
-                        }
-                        const response = await parseFn({
-                            params: {
-                                requestURL: shareUrl,
-                                captchaKey: "",
-                                captchaInput: "",
-                                totalSuccessCount: "0",
-                                successCount: "0",
-                                firstSuccessDate: "",
-                                pagePath: window.location.pathname,
-                                uwx_id: "",
-                                isMobile: "false",
-                                geoipIp: "",
-                            },
-                            locale: document.documentElement.lang || "zh",
-                            theme: "light",
-                        });
-                        let decrypted = response.result && response.result.data;
-                        if (response.result && response.result.encrypt) {
-                            const cryptoModule = await requireFn.e(decryptChunkId).then(requireFn.bind(requireFn, decryptModuleId));
-                            decrypted = await cryptoModule.kukudemethod(
-                                response.result.data,
-                                response.result.iv,
-                                decryptKey,
-                            );
-                        }
-                        return {
-                            ok: true,
-                            responseStatus: response.response ? response.response.status : null,
-                            responseOk: response.response ? response.response.ok : null,
-                            result: response.result,
-                            decrypted,
-                        };
-                    }""",
-                    {
-                        "shareUrl": share_url,
-                        "moduleId": KUKUTOOL_PARSE_MODULE_ID,
-                        "decryptChunkId": KUKUTOOL_DECRYPT_CHUNK_ID,
-                        "decryptModuleId": KUKUTOOL_DECRYPT_MODULE_ID,
-                        "decryptKey": KUKUTOOL_DECRYPT_KEY,
-                    },
+                page = self._find_kukutool_page(browser, base_url)
+                if page is None:
+                    raise RuntimeError("请先在专用 Chrome 中打开 https://dy.kukutool.com，并保持该页面打开")
+                await self._wait_for_user_to_clear_kukutool_gate(page)
+                await page.context.grant_permissions(
+                    ["clipboard-read", "clipboard-write"],
+                    origin=f"{urlparse(base_url).scheme}://{urlparse(base_url).netloc}",
                 )
+                results: list[dict | Exception] = []
+                for share_url in share_urls:
+                    try:
+                        results.append(await self._parse_loaded_page_async(page, share_url))
+                    except Exception as exc:
+                        results.append(exc)
             finally:
-                await context.close()
-        if not result.get("ok"):
-            raise RuntimeError("Kukutool 页面解析模块加载失败")
-        response_status = result.get("responseStatus")
-        response_payload = result.get("result") or {}
-        if response_status != 200:
-            message = response_payload.get("message") or response_payload.get("error") or response_payload.get("reason") or "unknown"
-            raise RuntimeError(f"Kukutool 解析失败: HTTP {response_status} {message}")
-        if response_payload.get("status") != 0:
-            message = response_payload.get("message") or response_payload.get("error") or "unknown"
-            raise RuntimeError(f"Kukutool 解析失败: {message}")
-        decrypted = result.get("decrypted")
-        if not isinstance(decrypted, dict):
-            raise RuntimeError("Kukutool 未返回可用的视频解析结果")
-        return decrypted
+                await browser.close()
+        return results
+
+    @staticmethod
+    def _find_kukutool_page(browser, base_url: str):
+        host = urlparse(base_url).netloc
+        for context in browser.contexts:
+            for page in context.pages:
+                if urlparse(page.url).netloc == host:
+                    return page
+        return None
+
+    @staticmethod
+    async def _wait_for_user_to_clear_kukutool_gate(page, *, timeout_seconds: int = 600) -> None:
+        for _ in range(timeout_seconds):
+            has_gate = await page.evaluate(
+                "() => Boolean(document.querySelector('.fc-dialog-overlay, .fc-message-root'))"
+            )
+            if not has_gate:
+                return
+            await page.wait_for_timeout(1000)
+        raise RuntimeError("Kukutool 的广告或验证窗口仍未处理，请完成后重新解析")
+
+    async def _parse_share_url_async(self, share_url: str, *, base_url: str) -> dict:
+        result = (await self._parse_share_urls_async([share_url], base_url=base_url))[0]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
     def parse_share_url(self, share_url: str, *, base_url: str) -> dict:
         return asyncio.run(self._parse_share_url_async(share_url, base_url=base_url))
+
+    def parse_share_urls(self, share_urls: list[str], *, base_url: str) -> list[dict | Exception]:
+        return asyncio.run(self._parse_share_urls_async(share_urls, base_url=base_url))
