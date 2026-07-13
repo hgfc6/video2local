@@ -41,7 +41,7 @@ def test_main_window_builds_buttons_and_status_label() -> None:
     assert not hasattr(window, "quality_strategy_input")
     assert window.native_resolver_checkbox.isChecked() is True
     assert window.kukutool_resolver_checkbox.isChecked() is True
-    assert window.share_input.placeholderText() == "粘贴抖音分享文案或分享链接"
+    assert window.share_input.placeholderText() == "粘贴抖音分享文案、短链或视频链接"
     assert window.parse_share_button.text() == "解析分享链接"
     assert window.download_share_button.text() == "下载所选版本"
     assert window.launch_button.text() == "启动 Chrome"
@@ -66,6 +66,22 @@ def test_main_window_builds_buttons_and_status_label() -> None:
     scroll_areas = window.findChildren(QScrollArea)
     assert len(scroll_areas) == 1
     assert scroll_areas[0].widgetResizable() is True
+
+    window.close()
+    app.quit()
+
+
+def test_main_window_switches_to_bilibili_workbench_and_hides_douyin_resolvers() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(MainController(engine=FakeEngine()))
+
+    window.handle_platform_switch("bilibili")
+
+    assert window.controller.platform_mode == "bilibili"
+    assert window.bilibili_platform_button.isChecked() is True
+    assert window.resolver_widget.isHidden() is True
+    assert window.bilibili_resolver_hint.isHidden() is False
+    assert "Bilibili" in window.share_input.placeholderText()
 
     window.close()
     app.quit()
@@ -116,11 +132,12 @@ def test_main_window_uses_shared_results_table_for_share_parse() -> None:
     window.refresh_labels()
 
     headers = [window.results_table.horizontalHeaderItem(index).text() for index in range(window.results_table.columnCount())]
-    assert headers == ["选择", "清晰度", "编码", "码率", "大小", "推荐"]
+    assert headers == ["选择", "清晰度", "来源", "编码", "码率", "大小", "推荐"]
     assert window.results_table.rowCount() == 1
     assert window.results_table.item(0, 0).flags() & Qt.ItemIsUserCheckable
     assert window.results_table.item(0, 0).checkState() == Qt.Unchecked
     assert window.results_table.item(0, 1).text() == "超高清"
+    assert window.results_table.item(0, 2).text() == "native"
 
     window.close()
     app.quit()
@@ -256,7 +273,7 @@ def test_main_window_rebuilds_shared_table_when_share_parse_follows_sync_preview
     window.refresh_labels()
 
     headers = [window.results_table.horizontalHeaderItem(index).text() for index in range(window.results_table.columnCount())]
-    assert headers == ["选择", "清晰度", "编码", "码率", "大小", "推荐"]
+    assert headers == ["选择", "清晰度", "来源", "编码", "码率", "大小", "推荐"]
     assert window.results_table.rowCount() == 1
     assert window.results_table.item(0, 0).flags() & Qt.ItemIsUserCheckable
     assert window.results_table.item(0, 0).text() == ""

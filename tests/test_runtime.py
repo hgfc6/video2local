@@ -5,7 +5,7 @@ import os
 from video2local.app_runtime import AppRuntime
 from video2local.domain import ShareParseResult, SourceType, SyncProgress, VideoMetadata, VideoVariant
 from video2local.browser import ChromeLaunchSpec
-from video2local.config import AppSettings
+from video2local.config import AppSettings, ShareResolverSettings
 from video2local.resolvers import KukutoolResolver, NativeDouyinResolver
 from video2local.sync_engine import SyncSummary
 
@@ -89,6 +89,7 @@ def test_runtime_can_switch_to_kukutool_only_at_runtime(tmp_path: Path) -> None:
         ),
     )
     runtime = AppRuntime(settings=settings)
+    cookies_path = tmp_path / "yt-dlp-cookies.txt"
 
     runtime.set_resolver_sources(("kukutool",))
 
@@ -157,6 +158,7 @@ def test_parse_share_text_prefers_kukutool_variants_when_enabled(tmp_path: Path)
     assert result.metadata.video_id == "7651428709099242127"
     assert result.provider_id == "kukutool"
     assert result.variants[0].quality_label == "超高清"
+    assert result.variants[0].provider_id == "kukutool"
     assert result.variants[0].file_size == 67819321
     assert result.variants[0].download_url == "https://cdn.example.com/ultra.mp4"
 
@@ -192,7 +194,7 @@ def test_validate_current_page_returns_friendly_error_for_chrome_internal_page(t
         try:
             runtime.validate_current_page()
         except RuntimeError as exc:
-            assert str(exc) == "请先在专用 Chrome 中打开抖音收藏页或作者作品页"
+            assert str(exc) == "请先在专用 Chrome 中打开受支持平台的收藏页或作者作品页"
         else:
             raise AssertionError("Expected RuntimeError for chrome internal page")
 
@@ -1317,3 +1319,152 @@ def test_download_share_variant_can_write_directly_into_output_root(tmp_path: Pa
         runtime.download_share_variant(parse_result, "720_1_1")
 
     assert download_mock.call_args.args[1] == custom_dir
+
+
+def test_parse_bilibili_share_text_uses_native_formats_without_kukutool(tmp_path: Path) -> None:
+    settings = AppSettings.for_root(
+        tmp_path,
+        platform_name="douyin",
+        supported_source_types=("favorites", "author_videos"),
+        share_resolvers=ShareResolverSettings(enable_kukutool_fallback=True, enabled_sources=("native", "kukutool")),
+    )
+    runtime = AppRuntime(settings=settings)
+    cookies_path = tmp_path / "yt-dlp-cookies.txt"
+    payload = {
+        "id": "BV1xx411c7mD",
+        "title": "B站测试视频",
+        "uploader": "测试UP",
+        "webpage_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+        "formats": [
+            {"format_id": "80", "height": 1080, "vcodec": "avc1", "acodec": "none", "tbr": 3600, "filesize": 30_000_000},
+            {"format_id": "30280", "vcodec": "none", "acodec": "mp4a", "abr": 192, "filesize": 2_000_000},
+        ],
+    }
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path) as export_mock:
+        with patch.object(runtime.downloader, "probe_video_info", return_value=payload) as probe_mock:
+            with patch.object(runtime.share_resolver, "resolve") as resolve_mock:
+                result = runtime.parse_share_text("【B站测试视频】https://b23.tv/AbCdEfG")
+
+    export_mock.assert_called_once_with(settings.paths.data_dir / "yt-dlp-cookies.txt")
+    probe_mock.assert_called_once_with(url="https://b23.tv/AbCdEfG", cookies_file=cookies_path)
+    resolve_mock.assert_not_called()
+    assert result.provider_id == "native"
+    assert result.metadata.platform == "bilibili"
+    assert result.variants[0].format_selector == "80+30280"
+
+
+def test_download_bilibili_variant_passes_selected_format_to_downloader(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    metadata = VideoMetadata(
+        platform="bilibili",
+        source_type=SourceType.SHARE_LINK,
+        video_id="BV1xx411c7mD",
+        title="B站测试视频",
+        author_name="测试UP",
+        page_url="https://www.bilibili.com/video/BV1xx411c7mD",
+        download_url="https://www.bilibili.com/video/BV1xx411c7mD",
+    )
+    variant = VideoVariant(
+        variant_id="bilibili:80+30280",
+        quality_label="1080p",
+        codec_label="H.264",
+        bit_rate=3600000,
+        file_size=32000000,
+        width=1920,
+        height=1080,
+        download_url=metadata.page_url,
+        format_selector="80+30280",
+        is_recommended=True,
+    )
+    parse_result = ShareParseResult(
+        provider_id="native",
+        source_url=metadata.page_url,
+        canonical_url=metadata.page_url,
+        metadata=metadata,
+        variants=[variant],
+    )
+
+    cookies_path = tmp_path / "yt-dlp-cookies.txt"
+    with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+        with patch.object(runtime.downloader, "download", return_value=("mp4", str(tmp_path / "B站测试视频-BV1xx411c7mD-1080p.mp4"))) as download_mock:
+            runtime.download_share_variant(parse_result, variant.variant_id)
+
+    assert download_mock.call_args.kwargs["format_selector"] == "80+30280"
+    assert download_mock.call_args.kwargs["cookies_file"] == cookies_path
+
+
+def test_parse_bilibili_share_text_falls_back_to_anonymous_when_chrome_is_unavailable(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    payload = {
+        "id": "BV1xx411c7mD",
+        "title": "B站测试视频",
+        "uploader": "测试UP",
+        "formats": [{"format_id": "80", "height": 1080, "vcodec": "avc1", "acodec": "mp4a", "tbr": 3600}],
+    }
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", side_effect=RuntimeError("Chrome is not running")):
+        with patch.object(runtime.downloader, "probe_video_info", return_value=payload) as probe_mock:
+            result = runtime.parse_share_text("https://www.bilibili.com/video/BV1xx411c7mD")
+
+    assert result.metadata.platform == "bilibili"
+    assert probe_mock.call_args.kwargs["cookies_file"] is None
+
+
+def test_preview_bilibili_author_page_uses_login_cookies_and_shows_selected_quality(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    cookies_path = tmp_path / "yt-dlp-cookies.txt"
+    payload = {
+        "id": "BV1xx411c7mD",
+        "title": "B站测试视频",
+        "uploader": "测试UP",
+        "webpage_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+        "formats": [
+            {"format_id": "80", "height": 1080, "vcodec": "avc1", "acodec": "none", "tbr": 3600, "filesize": 30_000_000},
+            {"format_id": "30280", "vcodec": "none", "acodec": "mp4a", "abr": 192, "filesize": 2_000_000},
+        ],
+    }
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://space.bilibili.com/123456/video"):
+        with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/BV1xx411c7mD">video</a>']):
+            with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+                with patch.object(runtime.downloader, "probe_video_info", return_value=payload) as probe_mock:
+                    with patch.object(runtime, "_resolve_kukutool_preview_candidates") as kukutool_preview_mock:
+                        preview = runtime.preview_sync()
+
+    assert preview.source.platform == "bilibili"
+    assert preview.items[0].selected_quality_label == "1080p"
+    assert preview.items[0].metadata.format_selector == "80+30280"
+    assert probe_mock.call_args.kwargs["cookies_file"] == cookies_path
+    kukutool_preview_mock.assert_not_called()
+
+
+def test_start_sync_bilibili_page_passes_selected_format_and_cookies_to_queue(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    cookies_path = tmp_path / "yt-dlp-cookies.txt"
+    payload = {
+        "id": "BV1xx411c7mD",
+        "title": "B站测试视频",
+        "uploader": "测试UP",
+        "webpage_url": "https://www.bilibili.com/video/BV1xx411c7mD",
+        "formats": [
+            {"format_id": "80", "height": 1080, "vcodec": "avc1", "acodec": "none", "tbr": 3600, "filesize": 30_000_000},
+            {"format_id": "30280", "vcodec": "none", "acodec": "mp4a", "abr": 192, "filesize": 2_000_000},
+        ],
+    }
+    captured_items: list[VideoMetadata] = []
+
+    def fake_sync_items(items, **kwargs):
+        captured_items.extend(items)
+        return SyncSummary(discovered_count=1, downloaded_count=1, status="completed")
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://space.bilibili.com/123456/favlist?fid=987654"):
+        with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/BV1xx411c7mD">video</a>']):
+            with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+                with patch.object(runtime.downloader, "probe_video_info", return_value=payload):
+                    with patch.object(runtime.sync_engine, "sync_items", side_effect=fake_sync_items) as sync_mock:
+                        runtime.start_sync()
+
+    assert captured_items[0].platform == "bilibili"
+    assert captured_items[0].format_selector == "80+30280"
+    assert sync_mock.call_args.kwargs["cookies_file"] == cookies_path

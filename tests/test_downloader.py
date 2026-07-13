@@ -18,7 +18,9 @@ def test_build_command_requests_best_quality_and_output_template(tmp_path: Path)
         cookies_from_browser="chrome",
     )
 
-    command = service.build_command(request)
+    with patch("video2local.downloader.shutil.which", return_value=None):
+        with patch.object(service, "_windows_path_entries", return_value=[]):
+            command = service.build_command(request)
 
     assert command == [
         "yt-dlp",
@@ -46,7 +48,9 @@ def test_build_command_omits_browser_cookies_when_not_requested(tmp_path: Path) 
         cookies_from_browser=None,
     )
 
-    command = service.build_command(request)
+    with patch("video2local.downloader.shutil.which", return_value=None):
+        with patch.object(service, "_windows_path_entries", return_value=[]):
+            command = service.build_command(request)
 
     assert command == [
         "yt-dlp",
@@ -61,6 +65,42 @@ def test_build_command_omits_browser_cookies_when_not_requested(tmp_path: Path) 
         str(tmp_path / "demo [abc123].%(ext)s"),
         "https://www.youtube.com/watch?v=abc123",
     ]
+
+
+def test_build_command_uses_selected_format_selector_for_bilibili_variant(tmp_path: Path) -> None:
+    service = YtDlpService(binary_name="yt-dlp")
+    request = DownloadRequest(
+        url="https://www.bilibili.com/video/BV1xx411c7mD",
+        download_dir=tmp_path,
+        filename_stem="测试视频-BV1xx411c7mD-1080p",
+        cookies_from_browser=None,
+        format_selector="80+30280",
+    )
+
+    command = service.build_command(request)
+
+    assert command[command.index("-f") + 1] == "80+30280"
+    assert command[-1] == "https://www.bilibili.com/video/BV1xx411c7mD"
+
+
+def test_build_command_finds_ffmpeg_from_refreshed_windows_path(tmp_path: Path) -> None:
+    ffmpeg_path = tmp_path / "tools" / "ffmpeg.exe"
+    ffmpeg_path.parent.mkdir()
+    ffmpeg_path.touch()
+    service = YtDlpService(binary_name="yt-dlp")
+    request = DownloadRequest(
+        url="https://www.bilibili.com/video/BV1xx411c7mD",
+        download_dir=tmp_path,
+        filename_stem="测试视频-BV1xx411c7mD-1080p",
+        cookies_from_browser=None,
+        format_selector="80+30280",
+    )
+
+    with patch("video2local.downloader.shutil.which", side_effect=[None, str(ffmpeg_path)]):
+        with patch.object(service, "_windows_path_entries", return_value=[str(ffmpeg_path.parent)]):
+            command = service.build_command(request)
+
+    assert command[command.index("--ffmpeg-location") + 1] == str(ffmpeg_path.parent)
 
 
 def test_default_command_uses_current_python_module_invocation(tmp_path: Path) -> None:
@@ -141,6 +181,51 @@ def test_download_returns_extension_and_output_path_from_completed_process(tmp_p
     assert file_ext == "mp4"
     assert local_path == output_path
     assert run_mock.called is True
+
+
+def test_download_selected_audio_video_format_requires_ffmpeg(tmp_path: Path) -> None:
+    service = YtDlpService(binary_name="yt-dlp")
+    metadata = VideoMetadata(
+        platform="bilibili",
+        source_type=SourceType.SHARE_LINK,
+        video_id="BV1xx411c7mD",
+        title="测试视频",
+        author_name="测试UP",
+        page_url="https://www.bilibili.com/video/BV1xx411c7mD",
+        download_url="https://www.bilibili.com/video/BV1xx411c7mD",
+    )
+
+    with patch("video2local.downloader.shutil.which", return_value=None):
+        try:
+            service.download(metadata=metadata, target_dir=tmp_path, format_selector="80+30280")
+        except RuntimeError as exc:
+            assert "ffmpeg" in str(exc)
+        else:
+            raise AssertionError("expected an ffmpeg requirement error")
+
+
+def test_download_selected_audio_video_format_uses_refreshed_windows_path(tmp_path: Path) -> None:
+    ffmpeg_path = tmp_path / "tools" / "ffmpeg.exe"
+    ffmpeg_path.parent.mkdir()
+    ffmpeg_path.touch()
+    service = YtDlpService(binary_name="yt-dlp")
+    metadata = VideoMetadata(
+        platform="bilibili",
+        source_type=SourceType.SHARE_LINK,
+        video_id="BV1xx411c7mD",
+        title="测试视频",
+        author_name="测试UP",
+        page_url="https://www.bilibili.com/video/BV1xx411c7mD",
+        download_url="https://www.bilibili.com/video/BV1xx411c7mD",
+    )
+    completed = CompletedProcess(args=["yt-dlp"], returncode=0, stdout=str(tmp_path / "output.mp4"), stderr="")
+
+    with patch("video2local.downloader.shutil.which", side_effect=[None, str(ffmpeg_path), None, str(ffmpeg_path)]):
+        with patch.object(service, "_windows_path_entries", return_value=[str(ffmpeg_path.parent)]):
+            with patch("video2local.downloader.subprocess.run", return_value=completed) as run_mock:
+                service.download(metadata=metadata, target_dir=tmp_path, format_selector="80+30280")
+
+    assert "--ffmpeg-location" in run_mock.call_args.args[0]
 
 
 def test_download_direct_media_url_writes_mp4_file_without_yt_dlp(tmp_path: Path) -> None:

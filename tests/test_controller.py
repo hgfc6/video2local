@@ -17,6 +17,7 @@ class FakeEngine:
     previewed: bool = False
     flat_output: bool = False
     resolver_sources: tuple[str, ...] = ("native", "kukutool")
+    active_platform: str | None = None
 
     def launch_chrome(self) -> None:
         self.launched = True
@@ -86,6 +87,9 @@ class FakeEngine:
     def set_resolver_sources(self, sources: tuple[str, ...]) -> None:
         self.resolver_sources = sources
 
+    def set_active_platform(self, platform: str) -> None:
+        self.active_platform = platform
+
 
 def test_main_controller_updates_status_when_sync_starts() -> None:
     engine = FakeEngine()
@@ -107,7 +111,7 @@ def test_main_controller_updates_status_when_chrome_launches() -> None:
 
     assert engine.launched is True
     assert controller.status_text == "Chrome 已启动"
-    assert controller.detail_text == "请在专用 Chrome 中登录并打开抖音内容源页面"
+    assert controller.detail_text == "请在专用 Chrome 中登录并打开受支持的平台内容页"
 
 
 def test_main_controller_updates_status_when_page_is_supported() -> None:
@@ -201,6 +205,31 @@ def test_main_controller_can_set_resolver_sources() -> None:
 
     assert engine.resolver_sources == ("native",)
     assert controller.resolver_sources == ("native",)
+
+
+def test_main_controller_switches_platform_and_clears_previous_results() -> None:
+    engine = FakeEngine()
+    controller = MainController(engine=engine)
+    controller.share_variants = [object()]
+    controller.results_revision = 3
+
+    controller.set_platform_mode("bilibili")
+
+    assert engine.active_platform == "bilibili"
+    assert controller.platform_mode == "bilibili"
+    assert controller.share_variants == []
+    assert controller.results_revision == 4
+    assert "结果表已清空" in controller.summary_text
+
+
+def test_main_controller_rejects_share_link_from_other_platform_workbench() -> None:
+    engine = FakeEngine()
+    controller = MainController(engine=engine)
+
+    controller.parse_share_text("https://www.bilibili.com/video/BV1xx411c7mD")
+
+    assert controller.status_text == "错误: 当前为抖音工作台"
+    assert "切换平台工作台" in controller.detail_text
 
 
 def test_main_controller_reports_preview_table_summary_after_preview() -> None:

@@ -24,6 +24,7 @@ class MainController:
     retry_count_text: str = "1"
     flat_output_enabled: bool = False
     resolver_sources: tuple[str, ...] = ("native", "kukutool")
+    platform_mode: str = "douyin"
 
     def __post_init__(self) -> None:
         self._lock = Lock()
@@ -36,12 +37,14 @@ class MainController:
         configured_sources = getattr(self.engine, "resolver_sources", None)
         if configured_sources:
             self.resolver_sources = tuple(configured_sources)
+        if hasattr(self.engine, "set_active_platform"):
+            self.engine.set_active_platform(self.platform_mode)
 
     def launch_chrome(self) -> None:
         if hasattr(self.engine, "launch_chrome"):
             self.engine.launch_chrome()
         self.status_text = "Chrome 已启动"
-        self.detail_text = "请在专用 Chrome 中登录并打开抖音内容源页面"
+        self.detail_text = "请在专用 Chrome 中登录并打开受支持的平台内容页"
 
     def validate_current_page(self) -> None:
         try:
@@ -103,6 +106,12 @@ class MainController:
         if worker is not None and worker.is_alive():
             self.status_text = "同步进行中"
             self.detail_text = "请等待当前任务结束后再解析分享链接"
+            return
+        detected_platform = self._share_platform(raw_text)
+        if detected_platform is not None and detected_platform != self.platform_mode:
+            selected_name = "抖音" if detected_platform == "douyin" else "Bilibili"
+            self.status_text = f"错误: 当前为{self._platform_name()}工作台"
+            self.detail_text = f"该链接属于 {selected_name}，请先切换平台工作台"
             return
         self.status_text = "正在解析分享链接"
         self.detail_text = "正在提取链接并加载可用清晰度版本"
@@ -179,6 +188,35 @@ class MainController:
         self.resolver_sources = normalized
         if hasattr(self.engine, "set_resolver_sources"):
             self.engine.set_resolver_sources(normalized)
+
+    def set_platform_mode(self, platform: str) -> None:
+        if platform not in {"douyin", "bilibili"}:
+            raise ValueError("不支持的平台工作台")
+        if platform == self.platform_mode:
+            return
+        self.platform_mode = platform
+        if hasattr(self.engine, "set_active_platform"):
+            self.engine.set_active_platform(platform)
+        self.share_parse_result = None
+        self.share_variants = []
+        self.sync_preview_items = []
+        self.results_mode = "sync_preview"
+        self.results_revision += 1
+        self.status_text = f"已切换到{self._platform_name()}工作台"
+        self.source_text = "解析来源: -"
+        self.detail_text = "请选择对应平台的页面或分享链接"
+        self.summary_text = "结果表已清空，避免跨平台内容混淆"
+
+    def _share_platform(self, raw_text: str) -> str | None:
+        lowered = raw_text.lower()
+        if "bilibili.com" in lowered or "b23.tv" in lowered:
+            return "bilibili"
+        if "douyin.com" in lowered or "iesdouyin.com" in lowered:
+            return "douyin"
+        return None
+
+    def _platform_name(self) -> str:
+        return "抖音" if self.platform_mode == "douyin" else "Bilibili"
 
     def wait_for_sync(self, timeout: float | None = None) -> None:
         worker = self._worker

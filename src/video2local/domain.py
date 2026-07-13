@@ -29,6 +29,7 @@ class VideoMetadata:
     page_url: str
     download_url: str
     duration_seconds: int | None = None
+    format_selector: str | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,8 @@ class VideoVariant:
     height: int | None
     download_url: str
     is_recommended: bool = False
+    format_selector: str | None = None
+    provider_id: str = "native"
 
 
 @dataclass(frozen=True)

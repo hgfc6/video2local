@@ -1,6 +1,7 @@
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
+    QButtonGroup,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -120,6 +121,8 @@ class MainWindow(QMainWindow):
             QPushButton#secondaryButton:hover { background: #e2e8dc; }
             QPushButton#accentButton { background: #2f6c5d; }
             QPushButton#accentButton:hover { background: #285b4f; }
+            QPushButton#platformButton { background: #ece8dc; color: #58645d; min-width: 104px; }
+            QPushButton#platformButton:checked { background: #254f45; color: white; }
             QFrame#panelCard {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #fffdf8, stop:1 #f4efe4);
                 border: 1px solid #ddd4c1;
@@ -140,6 +143,17 @@ class MainWindow(QMainWindow):
         )
         self.guide_label.setObjectName("heroBody")
         self.guide_label.setWordWrap(True)
+        self.douyin_platform_button = QPushButton("抖音工作台")
+        self.bilibili_platform_button = QPushButton("Bilibili 工作台")
+        for button in (self.douyin_platform_button, self.bilibili_platform_button):
+            button.setObjectName("platformButton")
+            button.setCheckable(True)
+        self.douyin_platform_button.setChecked(True)
+        self.platform_buttons = QButtonGroup(self)
+        self.platform_buttons.addButton(self.douyin_platform_button)
+        self.platform_buttons.addButton(self.bilibili_platform_button)
+        self.douyin_platform_button.clicked.connect(lambda: self.handle_platform_switch("douyin"))
+        self.bilibili_platform_button.clicked.connect(lambda: self.handle_platform_switch("bilibili"))
         self.output_dir_input = QLineEdit(self.controller.output_dir_text)
         self.output_dir_input.setReadOnly(True)
         self.output_dir_button = QPushButton("选择目录")
@@ -151,12 +165,12 @@ class MainWindow(QMainWindow):
         self.limit_input.setPlaceholderText("全部")
         self.retry_input = QLineEdit(self.controller.retry_count_text)
         self.retry_input.setPlaceholderText("1")
-        self.native_resolver_checkbox = QCheckBox("站内解析 (native)")
+        self.native_resolver_checkbox = QCheckBox("原生解析")
         self.native_resolver_checkbox.setChecked("native" in self.controller.resolver_sources)
-        self.kukutool_resolver_checkbox = QCheckBox("第三方解析 (kukutool)")
+        self.kukutool_resolver_checkbox = QCheckBox("Kukutool")
         self.kukutool_resolver_checkbox.setChecked("kukutool" in self.controller.resolver_sources)
         self.share_input = QLineEdit()
-        self.share_input.setPlaceholderText("粘贴抖音分享文案或分享链接")
+        self.share_input.setPlaceholderText("粘贴抖音或哔哩哔哩分享文案、短链或视频链接")
         self.parse_share_button = QPushButton("解析分享链接")
         self.parse_share_button.setObjectName("accentButton")
         self.parse_share_button.clicked.connect(self.handle_parse_share)
@@ -214,6 +228,12 @@ class MainWindow(QMainWindow):
         hero_layout.setContentsMargins(18, 14, 18, 14)
         hero_layout.setSpacing(4)
         hero_layout.addWidget(self.hero_title)
+        platform_row = QHBoxLayout()
+        platform_row.setSpacing(8)
+        platform_row.addWidget(self.douyin_platform_button)
+        platform_row.addWidget(self.bilibili_platform_button)
+        platform_row.addStretch(1)
+        hero_layout.addLayout(platform_row)
         hero_layout.addWidget(self.guide_label)
         hero_card = QFrame()
         hero_card.setObjectName("panelCard")
@@ -231,16 +251,23 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(QLabel("前 N 个视频"), 2, 0)
         settings_layout.addWidget(self.limit_input, 2, 1)
         settings_layout.addWidget(QLabel("留空表示下载当前页面全部可见视频"), 2, 2)
-        settings_layout.addWidget(QLabel("解析来源"), 3, 0)
+        self.resolver_label = QLabel("抖音解析来源")
+        settings_layout.addWidget(self.resolver_label, 3, 0)
         resolver_row = QHBoxLayout()
         resolver_row.setSpacing(12)
         resolver_row.addWidget(self.native_resolver_checkbox)
         resolver_row.addWidget(self.kukutool_resolver_checkbox)
         resolver_row.addStretch(1)
-        settings_layout.addLayout(resolver_row, 3, 1, 1, 2)
-        settings_layout.addWidget(QLabel("失败重试"), 4, 0)
-        settings_layout.addWidget(self.retry_input, 4, 1)
-        settings_layout.addWidget(QLabel("串行重试次数，建议 0-2"), 4, 2)
+        self.resolver_widget = QWidget()
+        self.resolver_widget.setLayout(resolver_row)
+        settings_layout.addWidget(self.resolver_widget, 3, 1, 1, 2)
+        self.bilibili_resolver_hint = QLabel("Bilibili 固定使用原生解析和登录 cookies")
+        self.bilibili_resolver_hint.setObjectName("sectionHint")
+        self.bilibili_resolver_hint.setVisible(False)
+        settings_layout.addWidget(self.bilibili_resolver_hint, 4, 1, 1, 2)
+        settings_layout.addWidget(QLabel("失败重试"), 5, 0)
+        settings_layout.addWidget(self.retry_input, 5, 1)
+        settings_layout.addWidget(QLabel("串行重试次数，建议 0-2"), 5, 2)
         settings_group.setLayout(settings_layout)
 
         self.status_group = QGroupBox("运行状态")
@@ -262,9 +289,9 @@ class MainWindow(QMainWindow):
         sync_layout = QVBoxLayout()
         sync_layout.setContentsMargins(14, 16, 14, 14)
         sync_layout.setSpacing(10)
-        sync_hint = QLabel("用于收藏页或作者作品页。先检查当前页面，再下载首个样本确认链路。")
-        sync_hint.setObjectName("sectionHint")
-        sync_layout.addWidget(sync_hint)
+        self.sync_hint = QLabel("打开抖音收藏页或作者作品页。先检查当前页面，再下载首个样本确认链路。")
+        self.sync_hint.setObjectName("sectionHint")
+        sync_layout.addWidget(self.sync_hint)
         sync_buttons_row1 = QHBoxLayout()
         sync_buttons_row1.setSpacing(8)
         sync_buttons_row1.addWidget(self.launch_button)
@@ -288,9 +315,9 @@ class MainWindow(QMainWindow):
         share_layout = QVBoxLayout()
         share_layout.setContentsMargins(14, 16, 14, 14)
         share_layout.setSpacing(10)
-        share_hint = QLabel("适合分享文案或短链，先看清晰度信息，再下载所选版本。")
-        share_hint.setObjectName("sectionHint")
-        share_layout.addWidget(share_hint)
+        self.share_hint = QLabel("粘贴抖音分享文案或短链，查看各来源的清晰度后下载所选版本。")
+        self.share_hint.setObjectName("sectionHint")
+        share_layout.addWidget(self.share_hint)
         share_layout.addWidget(self.share_input)
         share_actions = QHBoxLayout()
         share_actions.setSpacing(8)
@@ -303,7 +330,7 @@ class MainWindow(QMainWindow):
         results_layout = QVBoxLayout()
         results_layout.setContentsMargins(14, 16, 14, 14)
         results_layout.setSpacing(8)
-        results_hint = QLabel("批量预览和单链接解析共用这一张表；表头会随当前结果类型自动切换。")
+        results_hint = QLabel("批量预览和单链接解析共用这一张表；每个清晰度版本都会标记解析来源。")
         results_hint.setObjectName("sectionHint")
         results_layout.addWidget(results_hint)
         results_layout.addWidget(self.results_table)
@@ -336,10 +363,32 @@ class MainWindow(QMainWindow):
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll_area.setWidget(container)
         self.setCentralWidget(scroll_area)
+        self._apply_platform_mode(self.controller.platform_mode)
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(200)
         self.refresh_timer.timeout.connect(self.refresh_labels)
         self.refresh_timer.start()
+
+    def handle_platform_switch(self, platform: str) -> None:
+        self.controller.set_platform_mode(platform)
+        self._apply_platform_mode(platform)
+        self.refresh_labels()
+
+    def _apply_platform_mode(self, platform: str) -> None:
+        is_douyin = platform == "douyin"
+        self.douyin_platform_button.setChecked(is_douyin)
+        self.bilibili_platform_button.setChecked(not is_douyin)
+        self.resolver_label.setVisible(is_douyin)
+        self.resolver_widget.setVisible(is_douyin)
+        self.bilibili_resolver_hint.setVisible(not is_douyin)
+        if is_douyin:
+            self.sync_hint.setText("打开抖音收藏页或作者作品页。先检查当前页面，再下载首个样本确认链路。")
+            self.share_hint.setText("粘贴抖音分享文案或短链，查看各来源的清晰度后下载所选版本。")
+            self.share_input.setPlaceholderText("粘贴抖音分享文案、短链或视频链接")
+        else:
+            self.sync_hint.setText("打开 Bilibili 收藏夹或 UP 主投稿页。程序使用登录 cookies 获取可用画质。")
+            self.share_hint.setText("粘贴 Bilibili 视频链接、b23 短链或分享文案，原生解析后下载所选版本。")
+            self.share_input.setPlaceholderText("粘贴 Bilibili 视频链接、b23 短链或分享文案")
 
     def handle_launch(self) -> None:
         self.controller.launch_chrome()
@@ -413,12 +462,13 @@ class MainWindow(QMainWindow):
             self.controller.set_flat_output(self.flat_output_checkbox.isChecked())
             self.controller.set_sync_limit(self.limit_input.text())
             self.controller.set_retry_count(self.retry_input.text())
-            resolver_sources: list[str] = []
-            if self.native_resolver_checkbox.isChecked():
-                resolver_sources.append("native")
-            if self.kukutool_resolver_checkbox.isChecked():
-                resolver_sources.append("kukutool")
-            self.controller.set_resolver_sources(tuple(resolver_sources))
+            if self.controller.platform_mode == "douyin":
+                resolver_sources: list[str] = []
+                if self.native_resolver_checkbox.isChecked():
+                    resolver_sources.append("native")
+                if self.kukutool_resolver_checkbox.isChecked():
+                    resolver_sources.append("kukutool")
+                self.controller.set_resolver_sources(tuple(resolver_sources))
         except ValueError as exc:
             self.controller.status_text = f"错误: {exc}"
             self.controller.detail_text = "请修正下载设置后重试"
@@ -447,14 +497,15 @@ class MainWindow(QMainWindow):
         self._refresh_sync_preview_rows()
 
     def _configure_results_table_for_share_variants(self) -> None:
-        self.results_table.setColumnCount(6)
-        self.results_table.setHorizontalHeaderLabels(["选择", "清晰度", "编码", "码率", "大小", "推荐"])
+        self.results_table.setColumnCount(7)
+        self.results_table.setHorizontalHeaderLabels(["选择", "清晰度", "来源", "编码", "码率", "大小", "推荐"])
         self.results_table.setColumnWidth(0, 80)
         self.results_table.setColumnWidth(1, 140)
-        self.results_table.setColumnWidth(2, 140)
+        self.results_table.setColumnWidth(2, 120)
         self.results_table.setColumnWidth(3, 140)
         self.results_table.setColumnWidth(4, 140)
-        self.results_table.setColumnWidth(5, 100)
+        self.results_table.setColumnWidth(5, 140)
+        self.results_table.setColumnWidth(6, 100)
 
     def _configure_results_table_for_sync_preview(self) -> None:
         self.results_table.setColumnCount(6)
@@ -479,10 +530,11 @@ class MainWindow(QMainWindow):
             bit_rate = getattr(variant, "bit_rate", None)
             file_size = getattr(variant, "file_size", None)
             self.results_table.setItem(row, 1, QTableWidgetItem(getattr(variant, "quality_label", "")))
-            self.results_table.setItem(row, 2, QTableWidgetItem(getattr(variant, "codec_label", "")))
-            self.results_table.setItem(row, 3, QTableWidgetItem("" if bit_rate is None else f"{bit_rate / 1000:.0f} kbps"))
-            self.results_table.setItem(row, 4, QTableWidgetItem("" if file_size is None else f"{file_size / 1024 / 1024:.2f} MB"))
-            self.results_table.setItem(row, 5, QTableWidgetItem("是" if getattr(variant, "is_recommended", False) else ""))
+            self.results_table.setItem(row, 2, QTableWidgetItem(getattr(variant, "provider_id", "native")))
+            self.results_table.setItem(row, 3, QTableWidgetItem(getattr(variant, "codec_label", "")))
+            self.results_table.setItem(row, 4, QTableWidgetItem("" if bit_rate is None else f"{bit_rate / 1000:.0f} kbps"))
+            self.results_table.setItem(row, 5, QTableWidgetItem("" if file_size is None else f"{file_size / 1024 / 1024:.2f} MB"))
+            self.results_table.setItem(row, 6, QTableWidgetItem("是" if getattr(variant, "is_recommended", False) else ""))
 
     def _refresh_sync_preview_rows(self) -> None:
         items = self.controller.sync_preview_items
