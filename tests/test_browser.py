@@ -3,7 +3,17 @@ import json
 from unittest.mock import patch
 import asyncio
 
-from video2local.browser import ChromeLaunchSpec, ChromeRemoteSession, DouyinSignedSession, KukutoolSession, write_netscape_cookies
+from playwright.async_api import Error as PlaywrightError
+
+from video2local.browser import (
+    ChromeLaunchSpec,
+    ChromeRemoteSession,
+    DouyinSignedSession,
+    KukutoolSession,
+    evaluate_with_navigation_retry,
+    wait_for_function_with_navigation_retry,
+    write_netscape_cookies,
+)
 
 
 def test_chrome_launch_args_use_dedicated_profile_and_remote_debugging_port(tmp_path: Path) -> None:
@@ -28,6 +38,70 @@ def test_kukutool_quality_button_parser_extracts_size_and_label() -> None:
     variant = KukutoolSession._parse_quality_button_text("下载 超高清 (64.7MB)")
 
     assert variant == {"type": "超高清", "size": int(64.7 * 1024 * 1024)}
+
+
+def test_kukutool_result_wait_expression_matches_downloadable_quality_buttons() -> None:
+    expression = KukutoolSession._quality_result_wait_expression()
+
+    assert "下载" in expression
+    assert "KB|MB|GB" in expression
+
+
+def test_kukutool_clipboard_capture_script_intercepts_write_text() -> None:
+    source = KukutoolSession._install_clipboard_capture.__code__.co_consts
+
+    assert any("clipboard.writeText" in value for value in source if isinstance(value, str))
+
+
+def test_kukutool_page_check_rejects_ad_navigation() -> None:
+    base_url = "https://dy.kukutool.com/"
+
+    assert KukutoolSession._is_kukutool_page(base_url, base_url) is True
+    assert KukutoolSession._is_kukutool_page("https://googleads.g.doubleclick.net/pagead/ad", base_url) is False
+
+
+def test_page_evaluate_retries_when_navigation_replaces_execution_context() -> None:
+    class FakePage:
+        calls = 0
+
+        async def evaluate(self, expression: str):
+            self.calls += 1
+            if self.calls == 1:
+                raise PlaywrightError("Execution context was destroyed, most likely because of a navigation")
+            return "ready"
+
+        async def wait_for_load_state(self, state: str, timeout: int) -> None:
+            return None
+
+        async def wait_for_timeout(self, timeout: int) -> None:
+            return None
+
+    page = FakePage()
+
+    assert asyncio.run(evaluate_with_navigation_retry(page, "() => 'ready'")) == "ready"
+    assert page.calls == 2
+
+
+def test_page_wait_for_function_retries_when_navigation_replaces_execution_context() -> None:
+    class FakePage:
+        calls = 0
+
+        async def wait_for_function(self, expression: str, timeout: int) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise PlaywrightError("Execution context was destroyed, most likely because of a navigation")
+
+        async def wait_for_load_state(self, state: str, timeout: int) -> None:
+            return None
+
+        async def wait_for_timeout(self, timeout: int) -> None:
+            return None
+
+    page = FakePage()
+
+    asyncio.run(wait_for_function_with_navigation_retry(page, "() => true", timeout=1000))
+
+    assert page.calls == 2
 
 
 def test_kukutool_quality_button_parser_accepts_kukutool_compact_button_text() -> None:
@@ -113,6 +187,32 @@ def test_remote_session_ignores_about_blank_targets() -> None:
         session = ChromeRemoteSession()
 
         assert session.get_active_page_url() == "https://www.douyin.com/user/self?showTab=post"
+
+
+def test_remote_session_lists_all_page_targets_for_runtime_source_selection() -> None:
+    payload = json.dumps(
+        [
+            {"id": "1", "type": "page", "url": "https://dy.kukutool.com/"},
+            {"id": "2", "type": "page", "url": "https://www.douyin.com/user/self?showTab=favorite_collection"},
+            {"id": "3", "type": "page", "url": "about:blank"},
+        ]
+    ).encode("utf-8")
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return payload
+
+    with patch("video2local.browser.urlopen", return_value=FakeResponse()):
+        assert ChromeRemoteSession().list_page_urls() == [
+            "https://dy.kukutool.com/",
+            "https://www.douyin.com/user/self?showTab=favorite_collection",
+        ]
 
 
 def test_write_netscape_cookies_persists_compatible_cookie_file(tmp_path: Path) -> None:

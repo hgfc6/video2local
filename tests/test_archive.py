@@ -55,16 +55,16 @@ def test_build_target_path_uses_sanitized_video_id_when_title_missing(tmp_path: 
 def test_build_target_path_normalizes_multi_part_extension(tmp_path: Path) -> None:
     manager = ArchiveManager(download_root=tmp_path)
     metadata = VideoMetadata(
-        platform="youtube",
+        platform="bilibili",
         source_type=SourceType.AUTHOR_VIDEOS,
         video_id="abc123",
         title="demo",
         author_name="creator",
-        page_url="https://www.youtube.com/watch?v=abc123",
-        download_url="https://www.youtube.com/watch?v=abc123",
+        page_url="https://www.bilibili.com/video/BV1xx411c7mD",
+        download_url="https://www.bilibili.com/video/BV1xx411c7mD",
     )
 
-    expected = tmp_path / "youtube" / "creator" / "demo-abc123.tar.gz"
+    expected = tmp_path / "bilibili" / "creator" / "demo-abc123.tar.gz"
 
     assert manager.build_target_path(metadata, "tar.gz") == expected
 

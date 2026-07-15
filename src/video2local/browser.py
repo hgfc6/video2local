@@ -14,6 +14,7 @@ import time
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
@@ -26,6 +27,51 @@ VIDEO_ID_RE = re.compile(r"/video/(\d+)")
 KUKUTOOL_QUALITY_BUTTON_RE = re.compile(
     r"^下载\s*(?P<quality>.+?)\s*\((?P<size>[\d.]+)\s*(?P<unit>KB|MB|GB)\)$"
 )
+
+
+async def evaluate_with_navigation_retry(page, expression: str, *, attempts: int = 4):
+    """Retry page scripts briefly when a navigation replaces the execution context."""
+    last_error: PlaywrightError | None = None
+    for attempt in range(attempts):
+        try:
+            return await page.evaluate(expression)
+        except PlaywrightError as exc:
+            if "execution context was destroyed" not in str(exc).lower():
+                raise
+            last_error = exc
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except PlaywrightError:
+                pass
+            await page.wait_for_timeout(300 * (attempt + 1))
+    assert last_error is not None
+    raise last_error
+
+
+async def wait_for_function_with_navigation_retry(
+    page,
+    expression: str,
+    *,
+    timeout: int,
+    attempts: int = 4,
+) -> None:
+    """Keep waiting when Kukutool replaces the page during its parse flow."""
+    last_error: PlaywrightError | None = None
+    for attempt in range(attempts):
+        try:
+            await page.wait_for_function(expression, timeout=timeout)
+            return
+        except PlaywrightError as exc:
+            if "execution context was destroyed" not in str(exc).lower():
+                raise
+            last_error = exc
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except PlaywrightError:
+                pass
+            await page.wait_for_timeout(300 * (attempt + 1))
+    assert last_error is not None
+    raise last_error
 
 
 def write_netscape_cookies(output_path: Path, cookies: list[dict]) -> None:
@@ -86,15 +132,20 @@ class ChromeRemoteSession:
     def list_targets_url(self) -> str:
         return f"http://{self.host}:{self.port}/json/list"
 
-    def get_active_page_url(self) -> str:
-        with urlopen(self.list_targets_url()) as response:
+    def list_page_urls(self) -> list[str]:
+        with urlopen(self.list_targets_url(), timeout=10) as response:
             payload = json.loads(response.read().decode("utf-8"))
+        return [
+            item["url"]
+            for item in payload
+            if item.get("type") == "page" and item.get("url") and item["url"] != "about:blank"
+        ]
 
-        for item in payload:
-            if item.get("type") == "page" and item.get("url") and item["url"] != "about:blank":
-                return item["url"]
-
-        raise RuntimeError("No active page target found in Chrome remote session")
+    def get_active_page_url(self) -> str:
+        page_urls = self.list_page_urls()
+        if page_urls:
+            return page_urls[0]
+        raise RuntimeError("No page target found in Chrome remote session")
 
     def _find_target_page(self, browser, target_url: str):
         fallback_page = None
@@ -138,10 +189,11 @@ class ChromeRemoteSession:
     async def _fetch_active_page_html_snapshots_async(
         self,
         *,
+        target_url: str | None = None,
         scroll_rounds: int = 3,
         pause_ms: int = 500,
     ) -> list[str]:
-        target_url = self.get_active_page_url()
+        target_url = target_url or self.get_active_page_url()
         async with async_playwright() as playwright:
             browser = await playwright.chromium.connect_over_cdp(f"http://{self.host}:{self.port}")
             try:
@@ -149,7 +201,7 @@ class ChromeRemoteSession:
                 if page is not None:
                     snapshots = [await page.content()]
                     for _ in range(scroll_rounds):
-                        await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                        await evaluate_with_navigation_retry(page, "window.scrollTo(0, document.body.scrollHeight)")
                         await page.wait_for_timeout(pause_ms)
                         snapshots.append(await page.content())
                     return snapshots
@@ -179,11 +231,13 @@ class ChromeRemoteSession:
     def fetch_active_page_html_snapshots(
         self,
         *,
+        target_url: str | None = None,
         scroll_rounds: int = 3,
         pause_ms: int = 500,
     ) -> list[str]:
         return asyncio.run(
             self._fetch_active_page_html_snapshots_async(
+                target_url=target_url,
                 scroll_rounds=scroll_rounds,
                 pause_ms=pause_ms,
             )
@@ -422,7 +476,8 @@ class KukutoolSession(DouyinPublicSession):
     host: str = "127.0.0.1"
     port: int = 9222
 
-    async def _parse_loaded_page_async(self, page, share_url: str) -> dict:
+    async def _parse_loaded_page_async(self, page, share_url: str, *, base_url: str) -> dict:
+        await self._wait_for_user_to_clear_kukutool_gate(page, base_url=base_url)
         clear_button = page.get_by_role("button", name="清除内容")
         if await clear_button.count():
             await clear_button.click()
@@ -430,19 +485,12 @@ class KukutoolSession(DouyinPublicSession):
         await text_box.fill(share_url)
         await page.get_by_role("button", name="开始解析").click()
         await page.wait_for_timeout(300)
+        await self._wait_for_user_to_clear_kukutool_gate(page, base_url=base_url)
         try:
-            await page.wait_for_function(
-                """() => [...document.querySelectorAll('button')]
-                    .some((button) => button.innerText.trim() === '处理中...' || button.disabled)""",
-                timeout=5000,
-            )
-            await page.wait_for_function(
-                """() => [...document.querySelectorAll('button')]
-                    .some((button) => button.innerText.trim() === '开始解析' && !button.disabled)""",
-                timeout=60000,
-            )
+            await self._wait_for_quality_results(page, base_url=base_url)
         except PlaywrightTimeoutError as exc:
-            page_text = (await page.locator("body").inner_text()).strip()
+            page_text = await evaluate_with_navigation_retry(page, "document.body.innerText")
+            page_text = str(page_text).strip()
             raise RuntimeError(f"Kukutool 网页解析未完成: {page_text[-300:]}") from exc
 
         quality_buttons = page.locator("button")
@@ -453,34 +501,41 @@ class KukutoolSession(DouyinPublicSession):
         entries: list[dict] = []
         copied_values: list[str] = []
         seen_qualities: set[str] = set()
-        button_texts = [" ".join(text.split()) for text in await quality_buttons.all_text_contents()]
-        for index, button_text in enumerate(button_texts):
-            variant = self._parse_quality_button_text(button_text)
-            if variant is None:
-                continue
-            quality_label = variant["type"]
-            if quality_label in seen_qualities:
-                continue
-            seen_qualities.add(quality_label)
-            copy_button = next(
-                (
-                    quality_buttons.nth(next_index)
-                    for next_index in range(index + 1, len(button_texts))
-                    if button_texts[next_index] == "复制"
-                ),
-                None,
-            )
-            if copy_button is None:
-                continue
-            await copy_button.click()
-            await page.wait_for_timeout(500)
-            download_url = await page.evaluate("navigator.clipboard.readText()")
-            if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
-                download_url = self._read_windows_clipboard()
-            copied_values.append(str(download_url))
-            if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
-                continue
-            entries.append({**variant, "url": download_url})
+        capture_enabled = await self._install_clipboard_capture(page)
+        try:
+            button_texts = [" ".join(text.split()) for text in await quality_buttons.all_text_contents()]
+            for index, button_text in enumerate(button_texts):
+                variant = self._parse_quality_button_text(button_text)
+                if variant is None:
+                    continue
+                quality_label = variant["type"]
+                if quality_label in seen_qualities:
+                    continue
+                seen_qualities.add(quality_label)
+                copy_button = next(
+                    (
+                        quality_buttons.nth(next_index)
+                        for next_index in range(index + 1, len(button_texts))
+                        if button_texts[next_index] == "复制"
+                    ),
+                    None,
+                )
+                if copy_button is None:
+                    continue
+                capture_index = await self._clipboard_capture_length(page) if capture_enabled else 0
+                await copy_button.click()
+                download_url = await self._wait_for_captured_url(page, capture_index) if capture_enabled else ""
+                if not download_url:
+                    download_url = await evaluate_with_navigation_retry(page, "navigator.clipboard.readText()")
+                if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
+                    download_url = self._read_windows_clipboard()
+                copied_values.append(str(download_url))
+                if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
+                    continue
+                entries.append({**variant, "url": download_url})
+        finally:
+            if capture_enabled:
+                await self._restore_clipboard_capture(page)
         if not entries:
             raise RuntimeError(
                 "Kukutool 网页未提供可复制的视频下载链接: "
@@ -500,6 +555,67 @@ class KukutoolSession(DouyinPublicSession):
         unit = match.group("unit")
         multiplier = {"KB": 1024, "MB": 1024 * 1024, "GB": 1024 * 1024 * 1024}[unit]
         return {"type": match.group("quality"), "size": int(size * multiplier)}
+
+    @staticmethod
+    def _quality_result_wait_expression() -> str:
+        return """() => [...document.querySelectorAll('button')]
+            .some((button) => /^下载\\s*.+?\\s*\\([\\d.]+\\s*(KB|MB|GB)\\)$/.test(button.innerText.trim()))"""
+
+    @staticmethod
+    async def _install_clipboard_capture(page) -> bool:
+        return bool(
+            await evaluate_with_navigation_retry(
+                page,
+                """() => {
+                    const clipboard = navigator.clipboard;
+                    if (!clipboard || typeof clipboard.writeText !== 'function') return false;
+                    const key = '__video2localClipboardCapture';
+                    const existing = window[key];
+                    if (existing) existing.values.length = 0;
+                    else {
+                        const original = clipboard.writeText.bind(clipboard);
+                        const state = { original, values: [] };
+                        clipboard.writeText = async (value) => { state.values.push(String(value)); };
+                        window[key] = state;
+                    }
+                    return true;
+                }""",
+            )
+        )
+
+    @staticmethod
+    async def _clipboard_capture_length(page) -> int:
+        value = await evaluate_with_navigation_retry(
+            page,
+            "() => window.__video2localClipboardCapture?.values.length || 0",
+        )
+        return int(value)
+
+    @staticmethod
+    async def _wait_for_captured_url(page, start_index: int, *, timeout_seconds: int = 3) -> str:
+        for _ in range(timeout_seconds * 10):
+            value = await evaluate_with_navigation_retry(
+                page,
+                f"""() => (window.__video2localClipboardCapture?.values || [])
+                    .slice({start_index})
+                    .find((value) => /^https?:\\/\\//.test(value)) || ''""",
+            )
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                return value
+            await page.wait_for_timeout(100)
+        return ""
+
+    @staticmethod
+    async def _restore_clipboard_capture(page) -> None:
+        await evaluate_with_navigation_retry(
+            page,
+            """() => {
+                const state = window.__video2localClipboardCapture;
+                if (!state || !navigator.clipboard) return;
+                navigator.clipboard.writeText = state.original;
+                delete window.__video2localClipboardCapture;
+            }""",
+        )
 
     @staticmethod
     def _read_windows_clipboard() -> str:
@@ -523,7 +639,7 @@ class KukutoolSession(DouyinPublicSession):
                 page = self._find_kukutool_page(browser, base_url)
                 if page is None:
                     raise RuntimeError("请先在专用 Chrome 中打开 https://dy.kukutool.com，并保持该页面打开")
-                await self._wait_for_user_to_clear_kukutool_gate(page)
+                await self._wait_for_user_to_clear_kukutool_gate(page, base_url=base_url)
                 await page.context.grant_permissions(
                     ["clipboard-read", "clipboard-write"],
                     origin=f"{urlparse(base_url).scheme}://{urlparse(base_url).netloc}",
@@ -531,7 +647,7 @@ class KukutoolSession(DouyinPublicSession):
                 results: list[dict | Exception] = []
                 for share_url in share_urls:
                     try:
-                        results.append(await self._parse_loaded_page_async(page, share_url))
+                        results.append(await self._parse_loaded_page_async(page, share_url, base_url=base_url))
                     except Exception as exc:
                         results.append(exc)
             finally:
@@ -548,9 +664,42 @@ class KukutoolSession(DouyinPublicSession):
         return None
 
     @staticmethod
-    async def _wait_for_user_to_clear_kukutool_gate(page, *, timeout_seconds: int = 600) -> None:
+    def _is_kukutool_page(page_url: str, base_url: str) -> bool:
+        return urlparse(page_url).netloc == urlparse(base_url).netloc
+
+    async def _wait_for_kukutool_page(self, page, *, base_url: str, timeout_seconds: int = 600) -> None:
         for _ in range(timeout_seconds):
-            has_gate = await page.evaluate(
+            if self._is_kukutool_page(page.url, base_url):
+                return
+            await page.wait_for_timeout(1000)
+        raise RuntimeError("Kukutool 页面仍停留在广告或验证页，请关闭该页面并回到 https://dy.kukutool.com 后重试")
+
+    async def _wait_for_quality_results(self, page, *, base_url: str, timeout_seconds: int = 120) -> None:
+        for _ in range(timeout_seconds):
+            await self._wait_for_kukutool_page(page, base_url=base_url)
+            try:
+                await wait_for_function_with_navigation_retry(
+                    page,
+                    self._quality_result_wait_expression(),
+                    timeout=1000,
+                    attempts=2,
+                )
+                return
+            except PlaywrightTimeoutError:
+                continue
+        raise PlaywrightTimeoutError("Kukutool quality results did not appear before timeout")
+
+    async def _wait_for_user_to_clear_kukutool_gate(
+        self,
+        page,
+        *,
+        base_url: str,
+        timeout_seconds: int = 600,
+    ) -> None:
+        for _ in range(timeout_seconds):
+            await self._wait_for_kukutool_page(page, base_url=base_url)
+            has_gate = await evaluate_with_navigation_retry(
+                page,
                 "() => Boolean(document.querySelector('.fc-dialog-overlay, .fc-message-root'))"
             )
             if not has_gate:

@@ -5,10 +5,16 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from threading import Event, Lock
 from urllib.request import Request, urlopen
 
 from video2local.archive import ArchiveManager
 from video2local.domain import SourceType, VideoMetadata
+
+
+PROBE_TIMEOUT_SECONDS = 90
+DOWNLOAD_TIMEOUT_SECONDS = 60 * 60
+DIRECT_DOWNLOAD_TIMEOUT_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -25,6 +31,19 @@ class YtDlpService:
     def __init__(self, binary_name: str | list[str] | None = None) -> None:
         self.binary_name = binary_name
         self.archive_manager = ArchiveManager(download_root=Path("."))
+        self._stop_event = Event()
+        self._process_lock = Lock()
+        self._active_process: subprocess.Popen[str] | None = None
+
+    def clear_stop_request(self) -> None:
+        self._stop_event.clear()
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
+        with self._process_lock:
+            process = self._active_process
+            if process is not None and process.poll() is None:
+                process.terminate()
 
     @staticmethod
     def _windows_path_entries() -> list[str]:
@@ -56,20 +75,6 @@ class YtDlpService:
             refreshed_path = os.pathsep.join([os.environ.get("PATH", ""), *self._windows_path_entries()])
             discovered = shutil.which("ffmpeg", path=refreshed_path)
         return Path(discovered).parent if discovered else None
-
-    def _node_executable(self) -> str | None:
-        discovered = shutil.which("node") or shutil.which("node.exe")
-        if discovered is None:
-            refreshed_path = os.pathsep.join([os.environ.get("PATH", ""), *self._windows_path_entries()])
-            discovered = shutil.which("node", path=refreshed_path)
-        return discovered
-
-    def _javascript_runtime_args(self, url: str) -> list[str]:
-        host = url.lower()
-        if "youtube.com" not in host and "youtu.be" not in host:
-            return []
-        node = self._node_executable()
-        return ["--js-runtimes", f"node:{node}"] if node else []
 
     def command_prefix(self) -> list[str]:
         if self.binary_name is None:
@@ -103,7 +108,6 @@ class YtDlpService:
         command = [
             *self.command_prefix(),
             "--ignore-config",
-            *self._javascript_runtime_args(request.url),
             "-f",
             request.format_selector or "bv*+ba/b",
             "--merge-output-format",
@@ -164,7 +168,6 @@ class YtDlpService:
         command = [
             *self.command_prefix(),
             "--ignore-config",
-            *self._javascript_runtime_args(url),
             "--skip-download",
             "--dump-single-json",
         ]
@@ -173,7 +176,16 @@ class YtDlpService:
         elif cookies_from_browser:
             command.extend(["--cookies-from-browser", cookies_from_browser])
         command.append(url)
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        try:
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=PROBE_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("视频信息解析超时，请检查网络后重试") from exc
         if completed.returncode != 0:
             raise RuntimeError(self._probe_error_message(url, completed.stderr, completed.stdout))
         try:
@@ -187,15 +199,6 @@ class YtDlpService:
     def _probe_error_message(self, url: str, stderr: str, stdout: str) -> str:
         detail = (stderr or stdout).strip()
         lowered = detail.lower()
-        is_youtube = "youtube.com" in url.lower() or "youtu.be" in url.lower()
-        empty_youtube_result = is_youtube and (not detail or stdout.strip().lower() == "null")
-        if empty_youtube_result or "sign in to confirm you" in lowered or "not a bot" in lowered:
-            return (
-                "YouTube 要求登录确认不是机器人。请点击“启动 Chrome”，在打开的专用 Chrome 登录 YouTube，"
-                "完成验证后保持窗口打开，再重新解析。"
-            )
-        if "no supported javascript runtime" in lowered:
-            return "YouTube 解析缺少 JavaScript 运行时。请安装 Node.js 后重新启动程序。"
         compact_detail = " ".join(detail.split())
         if compact_detail:
             return f"视频信息解析失败: {compact_detail[-500:]}"
@@ -235,9 +238,33 @@ class YtDlpService:
             format_selector=format_selector,
         )
         command = self.build_command(request)
-        completed = subprocess.run(command, capture_output=True, text=True, check=True)
+        completed = self._run_download_command(command)
         output_path = completed.stdout.strip().splitlines()[-1]
         return self.infer_extension(output_path), output_path
+
+    def _run_download_command(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        with self._process_lock:
+            self._active_process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            process = self._active_process
+        try:
+            stdout, stderr = process.communicate(timeout=DOWNLOAD_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            process.kill()
+            process.communicate()
+            raise RuntimeError("视频下载超时，请检查网络后重试") from exc
+        finally:
+            with self._process_lock:
+                self._active_process = None
+        if self._stop_event.is_set():
+            raise RuntimeError("下载已停止")
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, command, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
     def _download_direct_media(
         self,
@@ -264,11 +291,17 @@ class YtDlpService:
                 "Referer": metadata.page_url,
             },
         )
-        with urlopen(http_request) as response:
-            with output_path.open("wb") as output_file:
-                while True:
-                    chunk = response.read(1024 * 64)
-                    if not chunk:
-                        break
-                    output_file.write(chunk)
+        try:
+            with urlopen(http_request, timeout=DIRECT_DOWNLOAD_TIMEOUT_SECONDS) as response:
+                with output_path.open("wb") as output_file:
+                    while True:
+                        if self._stop_event.is_set():
+                            raise RuntimeError("下载已停止")
+                        chunk = response.read(1024 * 64)
+                        if not chunk:
+                            break
+                        output_file.write(chunk)
+        except Exception:
+            output_path.unlink(missing_ok=True)
+            raise
         return "mp4", str(output_path)

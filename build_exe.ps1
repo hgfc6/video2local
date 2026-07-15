@@ -21,7 +21,6 @@ try {
         --specpath "build\spec" `
         --paths "src" `
         --collect-all "yt_dlp" `
-        --collect-all "yt_dlp_ejs" `
         --collect-all "playwright" `
         "src\video2local\main.py"
 

@@ -42,6 +42,22 @@ def test_resolver_chain_uses_next_resolver_after_failure() -> None:
     assert result.provider_id == "third_party"
 
 
+def test_resolver_chain_reports_each_selected_provider_when_all_fail() -> None:
+    chain = ResolverChain(
+        [
+            FakeResolver(provider_id="kukutool", error=RuntimeError("广告页跳转")),
+            FakeResolver(provider_id="native", error=RuntimeError("详情接口不可用")),
+        ]
+    )
+
+    try:
+        chain.resolve("https://v.douyin.com/5MF6Y_tP8nk/")
+    except RuntimeError as exc:
+        assert str(exc) == "所有已选解析来源均失败: kukutool: 广告页跳转；native: 详情接口不可用"
+    else:
+        raise AssertionError("all resolver failures must be reported")
+
+
 def test_native_douyin_resolver_prefers_signed_session_before_public_fallback(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     resolver = NativeDouyinResolver(
@@ -97,32 +113,12 @@ def test_native_douyin_resolver_falls_back_to_public_after_signed_retries(tmp_pa
     assert result.payload == public_payload
 
 
-def test_kukutool_resolver_merges_kukutool_variants_with_native_metadata(tmp_path: Path) -> None:
+def test_kukutool_resolver_returns_variants_without_opening_a_native_metadata_page(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     resolver = KukutoolResolver(
         settings=settings,
         kukutool_session=KukutoolSession(),
-        signed_session=DouyinSignedSession(),
-        public_session=DouyinPublicSession(),
     )
-    detail_payload = {
-        "aweme_detail": {
-            "aweme_id": "7651428709099242127",
-            "desc": "分享视频",
-            "author": {"nickname": "香菜严选"},
-            "video": {
-                "bit_rate": [
-                    {
-                        "gear_name": "1080_1_1",
-                        "bit_rate": 3524000,
-                        "play_addr": {
-                            "url_list": ["https://cdn.example.com/native-1080.mp4"],
-                        },
-                    }
-                ]
-            },
-        }
-    }
     kukutool_payload = {
         "title": "",
         "type": "video",
@@ -142,20 +138,19 @@ def test_kukutool_resolver_merges_kukutool_variants_with_native_metadata(tmp_pat
         "video2local.resolvers.KukutoolSession.parse_share_url",
         return_value=kukutool_payload,
     ) as kukutool_parse_mock:
-        with patch(
-            "video2local.resolvers.DouyinSignedSession.fetch_share_aweme_detail",
-            return_value=("https://www.douyin.com/video/7651428709099242127", detail_payload),
-        ) as signed_fetch_mock:
-            result = resolver.resolve("https://v.douyin.com/5MF6Y_tP8nk/")
+        with patch("video2local.resolvers.DouyinSignedSession.fetch_share_aweme_detail") as signed_fetch_mock:
+            with patch("video2local.resolvers.DouyinPublicSession.fetch_share_aweme_detail") as public_fetch_mock:
+                result = resolver.resolve("https://v.douyin.com/5MF6Y_tP8nk/")
 
     kukutool_parse_mock.assert_called_once_with(
         "https://v.douyin.com/5MF6Y_tP8nk/",
         base_url=settings.share_resolvers.kukutool_base_url,
     )
-    signed_fetch_mock.assert_called_once()
+    signed_fetch_mock.assert_not_called()
+    public_fetch_mock.assert_not_called()
     assert result.provider_id == "kukutool"
-    assert result.canonical_url == "https://www.douyin.com/video/7651428709099242127"
-    assert result.payload["aweme_detail"]["author"]["nickname"] == "香菜严选"
+    assert result.canonical_url == "https://v.douyin.com/5MF6Y_tP8nk/"
+    assert result.payload["aweme_detail"]["author"]["nickname"] == "unknown"
     assert result.payload["aweme_detail"]["video"]["video_fullinfo"][1]["type"] == "超高清"
 
 
@@ -164,8 +159,6 @@ def test_kukutool_variant_only_resolution_does_not_request_douyin_metadata(tmp_p
     resolver = KukutoolResolver(
         settings=settings,
         kukutool_session=KukutoolSession(),
-        signed_session=DouyinSignedSession(),
-        public_session=DouyinPublicSession(),
     )
     kukutool_payload = {
         "url": "https://cdn.example.com/ultra.mp4",
@@ -182,13 +175,11 @@ def test_kukutool_variant_only_resolution_does_not_request_douyin_metadata(tmp_p
     assert result.payload["aweme_detail"]["video"]["video_fullinfo"][0]["type"] == "超高清"
 
 
-def test_kukutool_resolver_uses_placeholder_metadata_when_native_enrichment_fails(tmp_path: Path) -> None:
+def test_kukutool_resolver_uses_placeholder_metadata_without_native_enrichment(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     resolver = KukutoolResolver(
         settings=settings,
         kukutool_session=KukutoolSession(),
-        signed_session=DouyinSignedSession(),
-        public_session=DouyinPublicSession(),
     )
     kukutool_payload = {
         "title": "",
@@ -208,15 +199,7 @@ def test_kukutool_resolver_uses_placeholder_metadata_when_native_enrichment_fail
         "video2local.resolvers.KukutoolSession.parse_share_url",
         return_value=kukutool_payload,
     ):
-        with patch(
-            "video2local.resolvers.DouyinSignedSession.fetch_share_aweme_detail",
-            side_effect=RuntimeError("signed unavailable"),
-        ):
-            with patch(
-                "video2local.resolvers.DouyinPublicSession.fetch_share_aweme_detail",
-                side_effect=RuntimeError("public unavailable"),
-            ):
-                result = resolver.resolve("https://v.douyin.com/5MF6Y_tP8nk/")
+        result = resolver.resolve("https://v.douyin.com/5MF6Y_tP8nk/")
 
     assert result.provider_id == "kukutool"
     assert result.canonical_url == "https://v.douyin.com/5MF6Y_tP8nk/"

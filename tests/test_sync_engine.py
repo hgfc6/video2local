@@ -148,6 +148,22 @@ def test_sync_engine_stops_after_current_item_when_requested(tmp_path: Path) -> 
     assert downloader.downloads == ["735010"]
 
 
+def test_sync_engine_forwards_stop_request_to_active_downloader(tmp_path: Path) -> None:
+    @dataclass
+    class CancellableDownloader:
+        stop_requested: bool = False
+
+        def request_stop(self) -> None:
+            self.stop_requested = True
+
+    downloader = CancellableDownloader()
+    engine = SyncEngine(repository=None, downloader=downloader, archive_manager=ArchiveManager(download_root=tmp_path))
+
+    engine.request_stop()
+
+    assert downloader.stop_requested is True
+
+
 def test_sync_engine_records_failed_video_and_continues(tmp_path: Path) -> None:
     @dataclass
     class FlakyDownloader:

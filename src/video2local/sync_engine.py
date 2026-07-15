@@ -27,6 +27,9 @@ class SyncEngine:
 
     def request_stop(self) -> None:
         self._stop_event.set()
+        request_stop = getattr(self.downloader, "request_stop", None)
+        if request_stop is not None:
+            request_stop()
 
     def sync_items(
         self,
@@ -38,6 +41,9 @@ class SyncEngine:
         discovered_count: int | None = None,
     ) -> SyncSummary:
         self._stop_event.clear()
+        clear_stop_request = getattr(self.downloader, "clear_stop_request", None)
+        if clear_stop_request is not None:
+            clear_stop_request()
         known_discovered_count = 0 if discovered_count is None else discovered_count
         downloaded_count = 0
         skipped_count = 0
@@ -144,6 +150,9 @@ class SyncEngine:
                 else:
                     raise RuntimeError(last_error)
             except Exception as exc:
+                if self._stop_event.is_set():
+                    status = SyncRunStatus.STOPPED.value
+                    break
                 failed_count += 1
                 report_rows.append(
                     self._report_row(

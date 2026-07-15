@@ -9,7 +9,6 @@ from video2local.archive import ArchiveManager
 from video2local.adapters.base import SourceDescriptor
 from video2local.adapters.bilibili import BilibiliAdapter
 from video2local.adapters.douyin import DouyinAdapter
-from video2local.adapters.youtube import YouTubeAdapter
 from video2local.browser import ChromeLaunchSpec, ChromeRemoteSession, DouyinPublicSession, DouyinSignedSession, KukutoolSession
 from video2local.config import AppSettings
 from video2local.downloader import YtDlpService
@@ -25,7 +24,6 @@ class AppRuntime:
     def __post_init__(self) -> None:
         self.adapter = DouyinAdapter()
         self.bilibili_adapter = BilibiliAdapter()
-        self.youtube_adapter = YouTubeAdapter()
         self.browser_session = ChromeRemoteSession()
         self.signed_session = DouyinSignedSession()
         self.public_session = DouyinPublicSession()
@@ -33,6 +31,7 @@ class AppRuntime:
         self.share_resolver = self._build_share_resolver_chain()
         self.last_progress: SyncProgress | None = None
         self.output_root = self.settings.paths.downloads_dir
+        self.output_root_selected = False
         self.sync_limit: int | None = None
         self.active_platform: str | None = None
         self.retry_count: int = 1
@@ -49,10 +48,10 @@ class AppRuntime:
     def ensure_directories(self) -> None:
         self.settings.paths.data_dir.mkdir(parents=True, exist_ok=True)
         self.settings.paths.chrome_profile_dir.mkdir(parents=True, exist_ok=True)
-        self.output_root.mkdir(parents=True, exist_ok=True)
 
     def set_output_root(self, output_root: Path) -> None:
         self.output_root = output_root
+        self.output_root_selected = True
         self.archive_manager.download_root = output_root
 
     def set_flat_output(self, enabled: bool) -> None:
@@ -76,7 +75,7 @@ class AppRuntime:
         self.share_resolver = self._build_share_resolver_chain()
 
     def set_active_platform(self, platform: str) -> None:
-        if platform not in {"douyin", "bilibili", "youtube"}:
+        if platform not in {"douyin", "bilibili"}:
             raise ValueError(f"不支持的平台工作台: {platform}")
         self.active_platform = platform
 
@@ -87,26 +86,39 @@ class AppRuntime:
 
     def get_current_source(self) -> SourceDescriptor:
         self.ensure_directories()
-        page_url = self.browser_session.get_active_page_url()
-        source = None
-        for adapter in (self.adapter, self.bilibili_adapter):
-            source = adapter.detect_source(page_url)
-            if source is not None:
-                break
-        if source is None:
-            if page_url.startswith("chrome://"):
-                raise RuntimeError("请先在专用 Chrome 中打开受支持平台的收藏页或作者作品页")
-            if "douyin.com" in page_url:
-                raise RuntimeError(
-                    f"当前抖音页面不受支持，请先打开“我”的作品页或收藏页后再开始。当前页面: {page_url}"
-                )
-            if "bilibili.com" in page_url:
-                raise RuntimeError("当前 Bilibili 页面不受支持，请打开 UP 主投稿页或收藏夹后再开始")
-            raise RuntimeError(f"Unsupported source page: {page_url}")
-        if self.active_platform is not None and source.platform != self.active_platform:
-            platform_name = "抖音" if source.platform == "douyin" else "Bilibili"
+        try:
+            fallback_page_url = self.browser_session.get_active_page_url()
+            listed_page_urls = self.browser_session.list_page_urls()
+            page_urls = listed_page_urls if fallback_page_url in listed_page_urls else [fallback_page_url]
+        except Exception:
+            # Keep test doubles and older Chrome sessions usable when the full target list is unavailable.
+            page_urls = [self.browser_session.get_active_page_url()]
+        all_sources = [
+            source
+            for page_url in page_urls
+            for adapter in (self.adapter, self.bilibili_adapter)
+            if (source := adapter.detect_source(page_url)) is not None
+        ]
+        sources = all_sources
+        if self.active_platform is not None:
+            sources = [source for source in sources if source.platform == self.active_platform]
+        if len(sources) == 1:
+            return sources[0]
+        if len(sources) > 1:
+            raise RuntimeError("检测到多个可同步内容页，请只保留当前工作台对应的一个收藏页或作品页后重试")
+        if all_sources and self.active_platform is not None:
+            platform_name = "抖音" if all_sources[0].platform == "douyin" else "Bilibili"
             raise RuntimeError(f"当前工作台为其他平台，请先切换到 {platform_name}")
-        return source
+        page_url = page_urls[0] if page_urls else ""
+        if not page_url or page_url.startswith("chrome://"):
+                raise RuntimeError("请先在专用 Chrome 中打开受支持平台的收藏页或作者作品页")
+        if "douyin.com" in page_url:
+            raise RuntimeError(
+                f"当前抖音页面不受支持，请先打开“我”的作品页或收藏页后再开始。当前页面: {page_url}"
+            )
+        if "bilibili.com" in page_url:
+            raise RuntimeError("当前 Bilibili 页面不受支持，请打开 UP 主投稿页或收藏夹后再开始")
+        raise RuntimeError(f"Unsupported source page: {page_url}")
 
     def validate_current_page(self) -> SourceDescriptor:
         return self.get_current_source()
@@ -179,7 +191,11 @@ class AppRuntime:
             items.append(preview_item)
         if not items and not skipped_items:
             raise RuntimeError("当前页面未发现可下载视频，请确认已登录，并等待作品或收藏列表加载完成后再试。")
-        report_path = self.sync_engine.write_skipped_items_report(skipped_items, self.output_root)
+        report_path = (
+            self.sync_engine.write_skipped_items_report(skipped_items, self.output_root)
+            if self.output_root_selected
+            else None
+        )
         return SyncPreviewResult(
             source=source,
             items=items,
@@ -211,6 +227,7 @@ class AppRuntime:
 
     def download_first_visible_sample(self) -> SampleDownloadResult:
         self.ensure_directories()
+        self._clear_download_stop_request()
         source = self.get_current_source()
         candidate_urls: list[str] = []
         seen_urls: set[str] = set()
@@ -244,8 +261,6 @@ class AppRuntime:
 
     def parse_share_text(self, raw_text: str) -> ShareParseResult:
         self.ensure_directories()
-        if self._is_youtube_share_text(raw_text):
-            return self._parse_youtube_share_text(raw_text)
         if self._is_bilibili_share_text(raw_text):
             return self._parse_bilibili_share_text(raw_text)
         share_url = self.adapter.extract_share_url(raw_text)
@@ -282,6 +297,7 @@ class AppRuntime:
         variant_id: str,
     ) -> ShareVariantDownloadResult:
         self.ensure_directories()
+        self._clear_download_stop_request()
         variant = next((item for item in parse_result.variants if item.variant_id == variant_id), None)
         if variant is None:
             raise RuntimeError(f"未找到要下载的清晰度版本: {variant_id}")
@@ -303,7 +319,7 @@ class AppRuntime:
         file_ext, local_path = self.downloader.download(
             metadata,
             target_dir,
-            cookies_file=self._export_browser_cookies() if metadata.platform in {"bilibili", "youtube"} else None,
+            cookies_file=self._export_browser_cookies() if metadata.platform == "bilibili" else None,
             filename_stem=filename_stem,
             format_selector=variant.format_selector,
         )
@@ -316,10 +332,6 @@ class AppRuntime:
     def _is_bilibili_share_text(self, raw_text: str) -> bool:
         lowered = raw_text.lower()
         return "bilibili.com" in lowered or "b23.tv" in lowered
-
-    def _is_youtube_share_text(self, raw_text: str) -> bool:
-        lowered = raw_text.lower()
-        return "youtube.com" in lowered or "youtu.be" in lowered
 
     def _parse_bilibili_share_text(self, raw_text: str) -> ShareParseResult:
         share_url = self.bilibili_adapter.extract_share_url(raw_text)
@@ -342,29 +354,17 @@ class AppRuntime:
             variants=variants,
         )
 
-    def _parse_youtube_share_text(self, raw_text: str) -> ShareParseResult:
-        share_url = self.youtube_adapter.extract_share_url(raw_text)
-        payload = self.downloader.probe_video_info(
-            url=share_url,
-            cookies_file=self._export_browser_cookies(),
-        )
-        metadata, variants = self.youtube_adapter.parse_video_info(payload, source_url=share_url)
-        if not variants:
-            raise RuntimeError("YouTube 视频未返回可下载格式，请检查链接、登录态或权限限制")
-        return ShareParseResult(
-            provider_id="native",
-            source_url=share_url,
-            canonical_url=metadata.page_url,
-            metadata=metadata,
-            variants=variants,
-        )
-
     def _export_browser_cookies(self) -> Path | None:
         """Use dedicated Chrome cookies when available, but keep public parsing usable."""
         try:
             return self.browser_session.export_cookies(self.settings.paths.data_dir / "yt-dlp-cookies.txt")
         except Exception:
             return None
+
+    def _clear_download_stop_request(self) -> None:
+        clear_stop_request = getattr(self.downloader, "clear_stop_request", None)
+        if clear_stop_request is not None:
+            clear_stop_request()
 
     def _export_bilibili_cookies(self) -> Path | None:
         """Backward-compatible name retained for callers outside the runtime."""
@@ -428,7 +428,10 @@ class AppRuntime:
         seen_urls: set[str] = set()
         adapter = self.adapter if source.platform == "douyin" else self.bilibili_adapter
         snapshot_options = {"scroll_rounds": 8, "pause_ms": 700} if source.platform == "bilibili" else {}
-        for html in self.browser_session.fetch_active_page_html_snapshots(**snapshot_options):
+        for html in self.browser_session.fetch_active_page_html_snapshots(
+            target_url=source.page_url,
+            **snapshot_options,
+        ):
             for url in adapter.collect_candidate_urls(html):
                 if url in seen_urls:
                     continue
@@ -630,8 +633,6 @@ class AppRuntime:
                         host=self.browser_session.host,
                         port=self.browser_session.port,
                     ),
-                    signed_session=self.signed_session,
-                    public_session=self.public_session,
                 )
             )
         if "native" in self.resolver_sources:

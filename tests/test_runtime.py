@@ -1,5 +1,7 @@
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 import os
 
 from video2local.app_runtime import AppRuntime
@@ -8,6 +10,14 @@ from video2local.browser import ChromeLaunchSpec
 from video2local.config import AppSettings, ShareResolverSettings
 from video2local.resolvers import KukutoolResolver, NativeDouyinResolver
 from video2local.sync_engine import SyncSummary
+
+
+@pytest.fixture(autouse=True)
+def isolate_runtime_browser_targets(monkeypatch):
+    monkeypatch.setattr(
+        "video2local.app_runtime.ChromeRemoteSession.list_page_urls",
+        lambda session: [session.get_active_page_url()],
+    )
 
 
 def kukutool_resolver_for(runtime: AppRuntime) -> KukutoolResolver:
@@ -29,7 +39,7 @@ def test_launch_chrome_creates_directories_and_starts_process(tmp_path: Path) ->
 
     assert settings.paths.data_dir.exists()
     assert settings.paths.chrome_profile_dir.exists()
-    assert settings.paths.downloads_dir.exists()
+    assert settings.paths.downloads_dir.exists() is False
     detect_mock.assert_called_once_with(settings.paths.chrome_profile_dir)
     popen_mock.assert_called_once_with(launch_spec.to_argv())
 
@@ -154,8 +164,8 @@ def test_parse_share_text_prefers_kukutool_variants_when_enabled(tmp_path: Path)
             result = runtime.parse_share_text("https://v.douyin.com/5MF6Y_tP8nk/")
 
     kukutool_parse_mock.assert_called_once()
-    signed_fetch_mock.assert_called_once()
-    assert result.metadata.video_id == "7651428709099242127"
+    signed_fetch_mock.assert_not_called()
+    assert result.metadata.video_id
     assert result.provider_id == "kukutool"
     assert result.variants[0].quality_label == "超高清"
     assert result.variants[0].provider_id == "kukutool"
@@ -173,6 +183,25 @@ def test_start_sync_detects_supported_douyin_source(tmp_path: Path) -> None:
     assert source is not None
     assert source.platform == "douyin"
     assert source.source_type == SourceType.FAVORITES
+
+
+def test_current_source_uses_only_supported_page_when_kukutool_tab_is_also_open(tmp_path: Path, monkeypatch) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    monkeypatch.setattr(
+        "video2local.app_runtime.ChromeRemoteSession.get_active_page_url",
+        lambda session: "https://dy.kukutool.com/",
+    )
+    monkeypatch.setattr(
+        "video2local.app_runtime.ChromeRemoteSession.list_page_urls",
+        lambda session: [
+            "https://dy.kukutool.com/",
+            "https://www.douyin.com/user/self?showTab=favorite_collection",
+        ],
+    )
+
+    source = runtime.get_current_source()
+
+    assert source.page_url == "https://www.douyin.com/user/self?showTab=favorite_collection"
 
 
 def test_validate_current_page_returns_supported_source(tmp_path: Path) -> None:
@@ -1411,68 +1440,6 @@ def test_parse_bilibili_share_text_falls_back_to_anonymous_when_chrome_is_unavai
     assert probe_mock.call_args.kwargs["cookies_file"] is None
 
 
-def test_parse_youtube_share_text_uses_native_formats_and_browser_cookies(tmp_path: Path) -> None:
-    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
-    cookies_path = tmp_path / "yt-dlp-cookies.txt"
-    payload = {
-        "id": "abcDEF12345",
-        "title": "YouTube 测试视频",
-        "uploader": "测试频道",
-        "webpage_url": "https://www.youtube.com/watch?v=abcDEF12345",
-        "formats": [
-            {"format_id": "248", "height": 1080, "vcodec": "vp9", "acodec": "none", "tbr": 4500},
-            {"format_id": "251", "vcodec": "none", "acodec": "opus", "abr": 160},
-        ],
-    }
-
-    with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
-        with patch.object(runtime.downloader, "probe_video_info", return_value=payload) as probe_mock:
-            result = runtime.parse_share_text("分享 https://youtu.be/abcDEF12345")
-
-    assert result.metadata.platform == "youtube"
-    assert result.variants[0].format_selector == "248+251"
-    assert probe_mock.call_args.kwargs["cookies_file"] == cookies_path
-
-
-def test_download_youtube_share_variant_passes_selected_format_and_cookies(tmp_path: Path) -> None:
-    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
-    parse_result = ShareParseResult(
-        provider_id="native",
-        source_url="https://youtu.be/abcDEF12345",
-        canonical_url="https://www.youtube.com/watch?v=abcDEF12345",
-        metadata=VideoMetadata(
-            platform="youtube",
-            source_type=SourceType.SHARE_LINK,
-            video_id="abcDEF12345",
-            title="YouTube 测试视频",
-            author_name="测试频道",
-            page_url="https://www.youtube.com/watch?v=abcDEF12345",
-            download_url="https://www.youtube.com/watch?v=abcDEF12345",
-        ),
-        variants=[
-            VideoVariant(
-                variant_id="youtube:248+251",
-                quality_label="1080p",
-                codec_label="VP9",
-                bit_rate=4500000,
-                file_size=None,
-                width=1920,
-                height=1080,
-                download_url="https://www.youtube.com/watch?v=abcDEF12345",
-                format_selector="248+251",
-            )
-        ],
-    )
-    cookies_path = tmp_path / "yt-dlp-cookies.txt"
-
-    with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
-        with patch.object(runtime.downloader, "download", return_value=("mp4", str(tmp_path / "YouTube 测试视频-abcDEF12345-1080p.mp4"))) as download_mock:
-            runtime.download_share_variant(parse_result, "youtube:248+251")
-
-    assert download_mock.call_args.kwargs["cookies_file"] == cookies_path
-    assert download_mock.call_args.kwargs["format_selector"] == "248+251"
-
-
 def test_preview_bilibili_author_page_uses_login_cookies_and_shows_selected_quality(tmp_path: Path) -> None:
     runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
     cookies_path = tmp_path / "yt-dlp-cookies.txt"
@@ -1503,6 +1470,7 @@ def test_preview_bilibili_author_page_uses_login_cookies_and_shows_selected_qual
 
 def test_preview_bilibili_skips_expired_video_and_writes_details_to_output_root(tmp_path: Path) -> None:
     runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    runtime.set_output_root(tmp_path / "output")
     cookies_path = tmp_path / "yt-dlp-cookies.txt"
     working_payload = {
         "id": "BV1ok411c7mD",

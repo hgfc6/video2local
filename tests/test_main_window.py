@@ -6,6 +6,8 @@ from video2local.ui.main_window import MainWindow
 
 
 class FakeEngine:
+    started = False
+
     def launch_chrome(self) -> None:
         return None
 
@@ -19,6 +21,7 @@ class FakeEngine:
         return None
 
     def start_sync(self):
+        self.started = True
         class Summary:
             discovered_count = 0
             downloaded_count = 0
@@ -34,8 +37,9 @@ def test_main_window_builds_buttons_and_status_label() -> None:
     window = MainWindow(MainController(engine=FakeEngine()))
 
     assert window.windowTitle() == "Video2Local"
-    assert "输出目录" in window.guide_label.text()
-    assert window.output_dir_input.text() != ""
+    assert "浏览器页批量同步" in window.guide_label.text()
+    assert window.output_dir_input.text() == ""
+    assert window.output_dir_input.placeholderText() == "请选择下载输出目录"
     assert window.output_dir_button.text() == "选择目录"
     assert window.limit_input.placeholderText() == "全部"
     assert not hasattr(window, "quality_strategy_input")
@@ -59,9 +63,9 @@ def test_main_window_builds_buttons_and_status_label() -> None:
     assert "批量同步" in group_titles
     assert "单链接解析" in group_titles
     assert "结果预览" in group_titles
-    assert "运行状态" in group_titles
+    assert "同步设置" in group_titles
     assert len(window.findChildren(QTableWidget)) == 1
-    assert len(window.findChildren(QSplitter)) == 0
+    assert len(window.findChildren(QSplitter)) == 1
     assert window.height() <= 820
     scroll_areas = window.findChildren(QScrollArea)
     assert len(scroll_areas) == 1
@@ -87,22 +91,6 @@ def test_main_window_switches_to_bilibili_workbench_and_hides_douyin_resolvers()
     app.quit()
 
 
-def test_main_window_switches_to_youtube_single_link_workbench() -> None:
-    app = QApplication.instance() or QApplication([])
-    window = MainWindow(MainController(engine=FakeEngine()))
-
-    window.handle_platform_switch("youtube")
-
-    assert window.controller.platform_mode == "youtube"
-    assert window.youtube_platform_button.isChecked() is True
-    assert window.sync_group.isHidden() is True
-    assert "YouTube" in window.share_input.placeholderText()
-    assert window.youtube_chrome_button.isHidden() is False
-
-    window.close()
-    app.quit()
-
-
 def test_main_window_keeps_sync_preview_table_scrollable() -> None:
     app = QApplication.instance() or QApplication([])
     window = MainWindow(MainController(engine=FakeEngine()))
@@ -111,6 +99,21 @@ def test_main_window_keeps_sync_preview_table_scrollable() -> None:
     assert window.results_table.verticalScrollBarPolicy() == Qt.ScrollBarAlwaysOn
     assert window.results_table.minimumHeight() >= 220
     assert window.results_table.wordWrap() is False
+
+    window.close()
+    app.quit()
+
+
+def test_main_window_requires_output_directory_before_download_actions() -> None:
+    app = QApplication.instance() or QApplication([])
+    engine = FakeEngine()
+    window = MainWindow(MainController(engine=engine))
+
+    window.handle_start()
+
+    assert engine.started is False
+    assert window.controller.status_text == "错误: 请先选择下载输出目录"
+    assert window.controller.detail_text == "请修正下载设置后重试"
 
     window.close()
     app.quit()
@@ -159,7 +162,7 @@ def test_main_window_uses_shared_results_table_for_share_parse() -> None:
     app.quit()
 
 
-def test_main_window_downloads_checked_share_variant() -> None:
+def test_main_window_downloads_checked_share_variant(tmp_path) -> None:
     app = QApplication.instance() or QApplication([])
 
     class ShareEngine(FakeEngine):
@@ -205,6 +208,7 @@ def test_main_window_downloads_checked_share_variant() -> None:
     controller.wait_for_sync(timeout=1.0)
     window.refresh_labels()
     window.results_table.item(1, 0).setCheckState(Qt.Checked)
+    window.output_dir_input.setText(str(tmp_path))
 
     window.handle_download_share()
     controller.wait_for_sync(timeout=1.0)

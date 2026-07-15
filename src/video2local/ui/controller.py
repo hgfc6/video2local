@@ -29,11 +29,6 @@ class MainController:
     def __post_init__(self) -> None:
         self._lock = Lock()
         self._worker: Thread | None = None
-        output_root = getattr(self.engine, "output_root", None)
-        if output_root is not None:
-            self.output_dir_text = str(output_root)
-        else:
-            self.output_dir_text = str(Path.cwd())
         configured_sources = getattr(self.engine, "resolver_sources", None)
         if configured_sources:
             self.resolver_sources = tuple(configured_sources)
@@ -147,7 +142,12 @@ class MainController:
         )
 
     def set_output_dir(self, raw_path: str) -> None:
-        target = Path(raw_path).expanduser()
+        text = raw_path.strip()
+        if not text:
+            raise ValueError("请先选择下载输出目录")
+        target = Path(text).expanduser()
+        if not target.is_dir():
+            raise ValueError("输出目录不存在或不可用，请重新选择")
         if hasattr(self.engine, "set_output_root"):
             self.engine.set_output_root(target)
         self.output_dir_text = str(target)
@@ -190,7 +190,7 @@ class MainController:
             self.engine.set_resolver_sources(normalized)
 
     def set_platform_mode(self, platform: str) -> None:
-        if platform not in {"douyin", "bilibili", "youtube"}:
+        if platform not in {"douyin", "bilibili"}:
             raise ValueError("不支持的平台工作台")
         if platform == self.platform_mode:
             return
@@ -209,8 +209,6 @@ class MainController:
 
     def _share_platform(self, raw_text: str) -> str | None:
         lowered = raw_text.lower()
-        if "youtube.com" in lowered or "youtu.be" in lowered:
-            return "youtube"
         if "bilibili.com" in lowered or "b23.tv" in lowered:
             return "bilibili"
         if "douyin.com" in lowered or "iesdouyin.com" in lowered:
@@ -218,7 +216,7 @@ class MainController:
         return None
 
     def _platform_name(self) -> str:
-        return {"douyin": "抖音", "bilibili": "Bilibili", "youtube": "YouTube"}[self.platform_mode]
+        return {"douyin": "抖音", "bilibili": "Bilibili"}[self.platform_mode]
 
     def wait_for_sync(self, timeout: float | None = None) -> None:
         worker = self._worker

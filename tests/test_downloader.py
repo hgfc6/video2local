@@ -42,7 +42,7 @@ def test_build_command_requests_best_quality_and_output_template(tmp_path: Path)
 def test_build_command_omits_browser_cookies_when_not_requested(tmp_path: Path) -> None:
     service = YtDlpService(binary_name="yt-dlp")
     request = DownloadRequest(
-        url="https://www.youtube.com/watch?v=abc123",
+        url="https://www.douyin.com/video/735002",
         download_dir=tmp_path,
         filename_stem="demo [abc123]",
         cookies_from_browser=None,
@@ -63,7 +63,7 @@ def test_build_command_omits_browser_cookies_when_not_requested(tmp_path: Path) 
         "after_move:filepath",
         "-o",
         str(tmp_path / "demo [abc123].%(ext)s"),
-        "https://www.youtube.com/watch?v=abc123",
+        "https://www.douyin.com/video/735002",
     ]
 
 
@@ -106,7 +106,7 @@ def test_build_command_finds_ffmpeg_from_refreshed_windows_path(tmp_path: Path) 
 def test_default_command_uses_current_python_module_invocation(tmp_path: Path) -> None:
     service = YtDlpService()
     request = DownloadRequest(
-        url="https://www.youtube.com/watch?v=abc123",
+        url="https://www.bilibili.com/video/BV1xx411c7mD",
         download_dir=tmp_path,
         filename_stem="demo [abc123]",
         cookies_from_browser=None,
@@ -175,12 +175,12 @@ def test_download_returns_extension_and_output_path_from_completed_process(tmp_p
     output_path = str(tmp_path / "晴天 [735004].mp4")
     completed = CompletedProcess(args=["yt-dlp"], returncode=0, stdout=f"note\n{output_path}\n", stderr="")
 
-    with patch("video2local.downloader.subprocess.run", return_value=completed) as run_mock:
+    with patch.object(service, "_run_download_command", return_value=completed) as command_mock:
         file_ext, local_path = service.download(metadata=metadata, target_dir=tmp_path)
 
     assert file_ext == "mp4"
     assert local_path == output_path
-    assert run_mock.called is True
+    assert command_mock.called is True
 
 
 def test_download_selected_audio_video_format_requires_ffmpeg(tmp_path: Path) -> None:
@@ -222,10 +222,10 @@ def test_download_selected_audio_video_format_uses_refreshed_windows_path(tmp_pa
 
     with patch("video2local.downloader.shutil.which", side_effect=[None, str(ffmpeg_path), None, str(ffmpeg_path)]):
         with patch.object(service, "_windows_path_entries", return_value=[str(ffmpeg_path.parent)]):
-            with patch("video2local.downloader.subprocess.run", return_value=completed) as run_mock:
+            with patch.object(service, "_run_download_command", return_value=completed) as command_mock:
                 service.download(metadata=metadata, target_dir=tmp_path, format_selector="80+30280")
 
-    assert "--ffmpeg-location" in run_mock.call_args.args[0]
+    assert "--ffmpeg-location" in command_mock.call_args.args[0]
 
 
 def test_download_direct_media_url_writes_mp4_file_without_yt_dlp(tmp_path: Path) -> None:
@@ -323,50 +323,3 @@ def test_probe_metadata_returns_video_metadata_from_yt_dlp_json() -> None:
     assert metadata.title == "夜景"
     assert metadata.author_name == "小明"
     assert metadata.page_url == "https://www.douyin.com/video/735005"
-
-
-def test_probe_video_info_explains_youtube_bot_verification_instead_of_json_error() -> None:
-    service = YtDlpService(binary_name="yt-dlp")
-    completed = CompletedProcess(
-        args=["yt-dlp"],
-        returncode=1,
-        stdout="null\n",
-        stderr="ERROR: [youtube] abc123: Sign in to confirm you’re not a bot.",
-    )
-
-    with patch("video2local.downloader.subprocess.run", return_value=completed):
-        try:
-            service.probe_video_info(url="https://youtu.be/abc123")
-        except RuntimeError as exc:
-            assert "登录确认不是机器人" in str(exc)
-            assert "启动 Chrome" in str(exc)
-        else:
-            raise AssertionError("Expected a friendly YouTube verification error")
-
-
-def test_probe_video_info_treats_empty_youtube_result_as_verification_failure() -> None:
-    service = YtDlpService(binary_name="yt-dlp")
-    completed = CompletedProcess(args=["yt-dlp"], returncode=0, stdout="", stderr="")
-
-    with patch("video2local.downloader.subprocess.run", return_value=completed):
-        try:
-            service.probe_video_info(url="https://youtu.be/IVYL3LU_rDs?si=9l6AWalqCWfSobXP")
-        except RuntimeError as exc:
-            assert "登录确认不是机器人" in str(exc)
-        else:
-            raise AssertionError("Expected a friendly YouTube verification error")
-
-
-def test_build_command_enables_node_runtime_for_youtube(tmp_path: Path) -> None:
-    service = YtDlpService(binary_name="yt-dlp")
-    request = DownloadRequest(
-        url="https://youtu.be/abc123",
-        download_dir=tmp_path,
-        filename_stem="demo-abc123",
-        cookies_from_browser=None,
-    )
-
-    with patch.object(service, "_node_executable", return_value=r"C:\Program Files\nodejs\node.exe"):
-        command = service.build_command(request)
-
-    assert command[command.index("--js-runtimes") + 1] == r"node:C:\Program Files\nodejs\node.exe"

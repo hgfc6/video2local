@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -30,7 +31,7 @@ class MainWindow(QMainWindow):
         self.controller = controller
         self._rendered_results_revision = -1
         self.setWindowTitle("Video2Local")
-        self.resize(1240, 780)
+        self.resize(1280, 760)
         self.setStyleSheet(
             """
             QMainWindow { background: #f7f5ef; }
@@ -38,9 +39,9 @@ class MainWindow(QMainWindow):
             QGroupBox {
                 background: rgba(255, 255, 252, 0.97);
                 border: 1px solid #ddd4c1;
-                border-radius: 18px;
-                margin-top: 16px;
-                padding-top: 14px;
+                border-radius: 14px;
+                margin-top: 12px;
+                padding-top: 10px;
                 font-weight: 600;
             }
             QGroupBox::title {
@@ -49,14 +50,14 @@ class MainWindow(QMainWindow):
                 padding: 0 8px;
                 color: #7b6248;
             }
-            QLabel#heroTitle { font-size: 26px; font-weight: 700; color: #25403b; }
+            QLabel#heroTitle { font-size: 22px; font-weight: 700; color: #25403b; }
             QLabel#heroBody { color: #5f6b68; line-height: 1.5; }
             QLabel#sectionHint { color: #667085; padding-bottom: 6px; }
             QLabel#statusChip {
                 background: #fcfbf7;
                 border: 1px solid #e5ddcd;
-                border-radius: 14px;
-                padding: 9px 12px;
+                border-radius: 10px;
+                padding: 7px 10px;
             }
             QLineEdit {
                 background: white;
@@ -126,7 +127,18 @@ class MainWindow(QMainWindow):
             QFrame#panelCard {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #fffdf8, stop:1 #f4efe4);
                 border: 1px solid #ddd4c1;
-                border-radius: 20px;
+                border-radius: 14px;
+            }
+            QFrame#statusBar {
+                background: #fffdf8;
+                border: 1px solid #ddd4c1;
+                border-radius: 12px;
+            }
+            QSplitter::handle {
+                background: #ebe4d5;
+                width: 6px;
+                margin: 8px 2px;
+                border-radius: 3px;
             }
             QCheckBox {
                 spacing: 8px;
@@ -137,28 +149,23 @@ class MainWindow(QMainWindow):
 
         self.hero_title = QLabel("Video2Local")
         self.hero_title.setObjectName("heroTitle")
-        self.guide_label = QLabel(
-            "浏览器页批量同步与分享链接单条下载共用一套目录设置。\n"
-            "先选择输出目录，再决定同步前 N 个视频，最后开始批量或单条下载。"
-        )
+        self.guide_label = QLabel("浏览器页批量同步与分享链接单条下载")
         self.guide_label.setObjectName("heroBody")
         self.guide_label.setWordWrap(True)
         self.douyin_platform_button = QPushButton("抖音工作台")
         self.bilibili_platform_button = QPushButton("Bilibili 工作台")
-        self.youtube_platform_button = QPushButton("YouTube 工作台")
-        for button in (self.douyin_platform_button, self.bilibili_platform_button, self.youtube_platform_button):
+        for button in (self.douyin_platform_button, self.bilibili_platform_button):
             button.setObjectName("platformButton")
             button.setCheckable(True)
         self.douyin_platform_button.setChecked(True)
         self.platform_buttons = QButtonGroup(self)
         self.platform_buttons.addButton(self.douyin_platform_button)
         self.platform_buttons.addButton(self.bilibili_platform_button)
-        self.platform_buttons.addButton(self.youtube_platform_button)
         self.douyin_platform_button.clicked.connect(lambda: self.handle_platform_switch("douyin"))
         self.bilibili_platform_button.clicked.connect(lambda: self.handle_platform_switch("bilibili"))
-        self.youtube_platform_button.clicked.connect(lambda: self.handle_platform_switch("youtube"))
         self.output_dir_input = QLineEdit(self.controller.output_dir_text)
         self.output_dir_input.setReadOnly(True)
+        self.output_dir_input.setPlaceholderText("请选择下载输出目录")
         self.output_dir_button = QPushButton("选择目录")
         self.output_dir_button.setObjectName("secondaryButton")
         self.output_dir_button.clicked.connect(self.handle_choose_output_dir)
@@ -179,10 +186,6 @@ class MainWindow(QMainWindow):
         self.parse_share_button.clicked.connect(self.handle_parse_share)
         self.download_share_button = QPushButton("下载所选版本")
         self.download_share_button.clicked.connect(self.handle_download_share)
-        self.youtube_chrome_button = QPushButton("启动 Chrome 并登录")
-        self.youtube_chrome_button.setObjectName("secondaryButton")
-        self.youtube_chrome_button.clicked.connect(self.handle_launch)
-        self.youtube_chrome_button.setVisible(False)
         self.status_label = QLabel(self.controller.status_text)
         self.source_label = QLabel(self.controller.source_text)
         self.detail_label = QLabel(self.controller.detail_text)
@@ -211,7 +214,7 @@ class MainWindow(QMainWindow):
         self.preview_button.setObjectName("secondaryButton")
         self.preview_button.clicked.connect(self.handle_preview_sync)
         self.results_table = QTableWidget(0, 6)
-        self.results_table.setMinimumHeight(220)
+        self.results_table.setMinimumHeight(320)
         self.results_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.results_table.setWordWrap(False)
         self.results_table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
@@ -232,35 +235,38 @@ class MainWindow(QMainWindow):
             label.setWordWrap(True)
 
         hero_layout = QVBoxLayout()
-        hero_layout.setContentsMargins(18, 14, 18, 14)
-        hero_layout.setSpacing(4)
-        hero_layout.addWidget(self.hero_title)
-        platform_row = QHBoxLayout()
-        platform_row.setSpacing(8)
-        platform_row.addWidget(self.douyin_platform_button)
-        platform_row.addWidget(self.bilibili_platform_button)
-        platform_row.addWidget(self.youtube_platform_button)
-        platform_row.addStretch(1)
-        hero_layout.addLayout(platform_row)
-        hero_layout.addWidget(self.guide_label)
+        hero_layout.setContentsMargins(16, 12, 16, 12)
+        hero_layout.setSpacing(8)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
+        title_row.addWidget(self.hero_title)
+        title_row.addWidget(self.guide_label)
+        title_row.addStretch(1)
+        title_row.addWidget(self.douyin_platform_button)
+        title_row.addWidget(self.bilibili_platform_button)
+        hero_layout.addLayout(title_row)
+        output_row = QHBoxLayout()
+        output_row.setSpacing(8)
+        output_row.addWidget(QLabel("输出目录"))
+        output_row.addWidget(self.output_dir_input, 1)
+        output_row.addWidget(self.output_dir_button)
+        output_row.addWidget(self.flat_output_checkbox)
+        hero_layout.addLayout(output_row)
         hero_card = QFrame()
         hero_card.setObjectName("panelCard")
         hero_card.setLayout(hero_layout)
 
-        settings_group = QGroupBox("下载设置")
+        settings_group = QGroupBox("同步设置")
         settings_layout = QGridLayout()
-        settings_layout.setContentsMargins(14, 16, 14, 14)
-        settings_layout.setHorizontalSpacing(10)
+        settings_layout.setContentsMargins(12, 14, 12, 12)
+        settings_layout.setHorizontalSpacing(8)
         settings_layout.setVerticalSpacing(8)
-        settings_layout.addWidget(QLabel("输出目录"), 0, 0)
-        settings_layout.addWidget(self.output_dir_input, 0, 1)
-        settings_layout.addWidget(self.output_dir_button, 0, 2)
-        settings_layout.addWidget(self.flat_output_checkbox, 1, 0, 1, 3)
-        settings_layout.addWidget(QLabel("前 N 个视频"), 2, 0)
-        settings_layout.addWidget(self.limit_input, 2, 1)
-        settings_layout.addWidget(QLabel("留空表示下载当前页面全部可见视频"), 2, 2)
+        settings_layout.addWidget(QLabel("前 N 个视频"), 0, 0)
+        settings_layout.addWidget(self.limit_input, 0, 1)
+        settings_layout.addWidget(QLabel("失败重试"), 1, 0)
+        settings_layout.addWidget(self.retry_input, 1, 1)
         self.resolver_label = QLabel("抖音解析来源")
-        settings_layout.addWidget(self.resolver_label, 3, 0)
+        settings_layout.addWidget(self.resolver_label, 2, 0, 1, 2)
         resolver_row = QHBoxLayout()
         resolver_row.setSpacing(12)
         resolver_row.addWidget(self.native_resolver_checkbox)
@@ -268,68 +274,42 @@ class MainWindow(QMainWindow):
         resolver_row.addStretch(1)
         self.resolver_widget = QWidget()
         self.resolver_widget.setLayout(resolver_row)
-        settings_layout.addWidget(self.resolver_widget, 3, 1, 1, 2)
+        settings_layout.addWidget(self.resolver_widget, 3, 0, 1, 2)
         self.bilibili_resolver_hint = QLabel("Bilibili 固定使用原生解析和登录 cookies")
         self.bilibili_resolver_hint.setObjectName("sectionHint")
         self.bilibili_resolver_hint.setVisible(False)
-        settings_layout.addWidget(self.bilibili_resolver_hint, 4, 1, 1, 2)
-        settings_layout.addWidget(QLabel("失败重试"), 5, 0)
-        settings_layout.addWidget(self.retry_input, 5, 1)
-        settings_layout.addWidget(QLabel("串行重试次数，建议 0-2"), 5, 2)
+        settings_layout.addWidget(self.bilibili_resolver_hint, 4, 0, 1, 2)
         settings_group.setLayout(settings_layout)
-
-        self.status_group = QGroupBox("运行状态")
-        status_layout = QGridLayout()
-        status_layout.setContentsMargins(14, 16, 14, 14)
-        status_layout.setHorizontalSpacing(12)
-        status_layout.setVerticalSpacing(8)
-        status_layout.addWidget(QLabel("当前状态"), 0, 0)
-        status_layout.addWidget(self.status_label, 0, 1)
-        status_layout.addWidget(QLabel("解析来源"), 1, 0)
-        status_layout.addWidget(self.source_label, 1, 1)
-        status_layout.addWidget(QLabel("当前详情"), 2, 0)
-        status_layout.addWidget(self.detail_label, 2, 1)
-        status_layout.addWidget(QLabel("本次摘要"), 3, 0)
-        status_layout.addWidget(self.summary_label, 3, 1)
-        self.status_group.setLayout(status_layout)
 
         self.sync_group = QGroupBox("批量同步")
         sync_layout = QVBoxLayout()
-        sync_layout.setContentsMargins(14, 16, 14, 14)
-        sync_layout.setSpacing(10)
+        sync_layout.setContentsMargins(12, 14, 12, 12)
+        sync_layout.setSpacing(8)
         self.sync_hint = QLabel("打开抖音收藏页或作者作品页。先检查当前页面，再下载首个样本确认链路。")
         self.sync_hint.setObjectName("sectionHint")
         sync_layout.addWidget(self.sync_hint)
-        sync_buttons_row1 = QHBoxLayout()
-        sync_buttons_row1.setSpacing(8)
-        sync_buttons_row1.addWidget(self.launch_button)
-        sync_buttons_row1.addWidget(self.validate_button)
-        sync_layout.addLayout(sync_buttons_row1)
-        sync_buttons_row2 = QHBoxLayout()
-        sync_buttons_row2.setSpacing(8)
-        sync_buttons_row2.addWidget(self.sample_button)
-        sync_buttons_row2.addWidget(self.preview_button)
-        sync_buttons_row2.addWidget(self.start_button)
-        sync_buttons_row2.addWidget(self.stop_button)
-        sync_layout.addLayout(sync_buttons_row2)
-        sync_buttons_row3 = QHBoxLayout()
-        sync_buttons_row3.setSpacing(8)
-        sync_buttons_row3.addWidget(self.open_downloads_button)
-        sync_buttons_row3.addWidget(self.summary_button)
-        sync_layout.addLayout(sync_buttons_row3)
+        sync_buttons = QGridLayout()
+        sync_buttons.setHorizontalSpacing(8)
+        sync_buttons.setVerticalSpacing(8)
+        sync_buttons.addWidget(self.launch_button, 0, 0)
+        sync_buttons.addWidget(self.validate_button, 0, 1)
+        sync_buttons.addWidget(self.preview_button, 1, 0)
+        sync_buttons.addWidget(self.sample_button, 1, 1)
+        sync_buttons.addWidget(self.start_button, 2, 0)
+        sync_buttons.addWidget(self.stop_button, 2, 1)
+        sync_layout.addLayout(sync_buttons)
         self.sync_group.setLayout(sync_layout)
 
         self.share_group = QGroupBox("单链接解析")
         share_layout = QVBoxLayout()
-        share_layout.setContentsMargins(14, 16, 14, 14)
-        share_layout.setSpacing(10)
+        share_layout.setContentsMargins(12, 14, 12, 12)
+        share_layout.setSpacing(8)
         self.share_hint = QLabel("粘贴抖音分享文案或短链，查看各来源的清晰度后下载所选版本。")
         self.share_hint.setObjectName("sectionHint")
         share_layout.addWidget(self.share_hint)
         share_layout.addWidget(self.share_input)
         share_actions = QHBoxLayout()
         share_actions.setSpacing(8)
-        share_actions.addWidget(self.youtube_chrome_button)
         share_actions.addWidget(self.parse_share_button)
         share_actions.addWidget(self.download_share_button)
         share_layout.addLayout(share_actions)
@@ -337,7 +317,7 @@ class MainWindow(QMainWindow):
 
         self.results_group = QGroupBox("结果预览")
         results_layout = QVBoxLayout()
-        results_layout.setContentsMargins(14, 16, 14, 14)
+        results_layout.setContentsMargins(12, 14, 12, 12)
         results_layout.setSpacing(8)
         results_hint = QLabel("批量预览和单链接解析共用这一张表；每个清晰度版本都会标记解析来源。")
         results_hint.setObjectName("sectionHint")
@@ -345,33 +325,66 @@ class MainWindow(QMainWindow):
         results_layout.addWidget(self.results_table)
         self.results_group.setLayout(results_layout)
 
-        right_column = QVBoxLayout()
-        right_column.setSpacing(12)
-        right_column.addWidget(self.share_group)
-        right_column.addWidget(self.status_group)
-        right_column.addStretch(1)
+        sidebar = QWidget()
+        sidebar.setMinimumWidth(300)
+        sidebar.setMaximumWidth(380)
+        sidebar_layout = QVBoxLayout()
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.setSpacing(10)
+        sidebar_layout.addWidget(self.sync_group)
+        sidebar_layout.addWidget(settings_group)
+        sidebar_layout.addWidget(self.share_group)
+        sidebar_layout.addStretch(1)
+        sidebar.setLayout(sidebar_layout)
 
-        operations_layout = QHBoxLayout()
-        operations_layout.setSpacing(12)
-        operations_layout.addWidget(self.sync_group, 1)
-        operations_layout.addLayout(right_column, 1)
+        results_panel = QWidget()
+        results_panel_layout = QVBoxLayout()
+        results_panel_layout.setContentsMargins(0, 0, 0, 0)
+        results_panel_layout.setSpacing(10)
+        results_panel_layout.addWidget(self.results_group, 1)
+        results_panel.setLayout(results_panel_layout)
+
+        workbench = QSplitter(Qt.Horizontal)
+        workbench.setChildrenCollapsible(False)
+        workbench.addWidget(sidebar)
+        workbench.addWidget(results_panel)
+        workbench.setStretchFactor(0, 0)
+        workbench.setStretchFactor(1, 1)
+        workbench.setSizes([340, 900])
+
+        body_container = QWidget()
+        body_layout = QVBoxLayout()
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.addWidget(workbench)
+        body_container.setLayout(body_layout)
+        body_scroll = QScrollArea()
+        body_scroll.setWidgetResizable(True)
+        body_scroll.setFrameShape(QFrame.NoFrame)
+        body_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        body_scroll.setWidget(body_container)
+
+        status_bar = QFrame()
+        status_bar.setObjectName("statusBar")
+        status_layout = QHBoxLayout()
+        status_layout.setContentsMargins(10, 8, 10, 8)
+        status_layout.setSpacing(8)
+        status_layout.addWidget(self.status_label)
+        status_layout.addWidget(self.source_label)
+        status_layout.addWidget(self.detail_label, 1)
+        status_layout.addWidget(self.summary_label, 2)
+        status_layout.addWidget(self.open_downloads_button)
+        status_layout.addWidget(self.summary_button)
+        status_bar.setLayout(status_layout)
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
         layout.addWidget(hero_card)
-        layout.addWidget(settings_group)
-        layout.addLayout(operations_layout)
-        layout.addWidget(self.results_group, 1)
-
-        container = QWidget()
-        container.setLayout(layout)
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.NoFrame)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll_area.setWidget(container)
-        self.setCentralWidget(scroll_area)
+        layout.addWidget(body_scroll, 1)
+        layout.addWidget(status_bar)
+        root = QWidget()
+        root.setLayout(layout)
+        self.setCentralWidget(root)
         self._apply_platform_mode(self.controller.platform_mode)
         self.refresh_timer = QTimer(self)
         self.refresh_timer.setInterval(200)
@@ -386,15 +399,11 @@ class MainWindow(QMainWindow):
     def _apply_platform_mode(self, platform: str) -> None:
         is_douyin = platform == "douyin"
         is_bilibili = platform == "bilibili"
-        is_youtube = platform == "youtube"
         self.douyin_platform_button.setChecked(is_douyin)
         self.bilibili_platform_button.setChecked(is_bilibili)
-        self.youtube_platform_button.setChecked(is_youtube)
         self.resolver_label.setVisible(is_douyin)
         self.resolver_widget.setVisible(is_douyin)
-        self.bilibili_resolver_hint.setVisible(is_bilibili or is_youtube)
-        self.sync_group.setVisible(not is_youtube)
-        self.youtube_chrome_button.setVisible(is_youtube)
+        self.bilibili_resolver_hint.setVisible(is_bilibili)
         if is_douyin:
             self.sync_hint.setText("打开抖音收藏页或作者作品页。先检查当前页面，再下载首个样本确认链路。")
             self.share_hint.setText("粘贴抖音分享文案或短链，查看各来源的清晰度后下载所选版本。")
@@ -405,10 +414,6 @@ class MainWindow(QMainWindow):
             self.share_hint.setText("粘贴 Bilibili 视频链接、b23 短链或分享文案，原生解析后下载所选版本。")
             self.share_input.setPlaceholderText("粘贴 Bilibili 视频链接、b23 短链或分享文案")
             self.bilibili_resolver_hint.setText("Bilibili 固定使用原生解析和登录 cookies")
-        else:
-            self.share_hint.setText("先点击“启动 Chrome 并登录”，在专用 Chrome 登录 YouTube；再粘贴视频链接解析可用清晰度。")
-            self.share_input.setPlaceholderText("粘贴 YouTube 视频链接、youtu.be 短链或分享文案")
-            self.bilibili_resolver_hint.setText("YouTube 固定使用原生解析；登录权限内容可使用专用 Chrome cookies")
 
     def handle_launch(self) -> None:
         self.controller.launch_chrome()
@@ -421,7 +426,7 @@ class MainWindow(QMainWindow):
         self.detail_label.setText(self.controller.detail_text)
 
     def handle_start(self) -> None:
-        if not self.apply_download_options():
+        if not self.apply_download_options(require_output_dir=True):
             return
         self.controller.start_sync()
         self.refresh_labels()
@@ -433,7 +438,7 @@ class MainWindow(QMainWindow):
         self.refresh_labels()
 
     def handle_sample_download(self) -> None:
-        if not self.apply_download_options():
+        if not self.apply_download_options(require_output_dir=True):
             return
         self.controller.download_first_visible_sample()
         self.refresh_labels()
@@ -445,7 +450,7 @@ class MainWindow(QMainWindow):
         self.refresh_labels()
 
     def handle_download_share(self) -> None:
-        if not self.apply_download_options():
+        if not self.apply_download_options(require_output_dir=True):
             return
         row = self._checked_share_variant_row()
         if row < 0 or row >= len(self.controller.share_variants):
@@ -462,6 +467,8 @@ class MainWindow(QMainWindow):
         self.refresh_labels()
 
     def handle_open_downloads(self) -> None:
+        if not self.apply_download_options(require_output_dir=True):
+            return
         self.controller.open_downloads_dir()
         self.refresh_labels()
 
@@ -474,11 +481,13 @@ class MainWindow(QMainWindow):
         if not selected_dir:
             return
         self.output_dir_input.setText(selected_dir)
-        self.apply_download_options()
+        self.apply_download_options(require_output_dir=True)
 
-    def apply_download_options(self) -> bool:
+    def apply_download_options(self, *, require_output_dir: bool = False) -> bool:
         try:
-            self.controller.set_output_dir(self.output_dir_input.text())
+            output_dir = self.output_dir_input.text().strip()
+            if require_output_dir or output_dir:
+                self.controller.set_output_dir(output_dir)
             self.controller.set_flat_output(self.flat_output_checkbox.isChecked())
             self.controller.set_sync_limit(self.limit_input.text())
             self.controller.set_retry_count(self.retry_input.text())
