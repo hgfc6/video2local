@@ -187,7 +187,9 @@ class YtDlpService:
     def _probe_error_message(self, url: str, stderr: str, stdout: str) -> str:
         detail = (stderr or stdout).strip()
         lowered = detail.lower()
-        if "sign in to confirm you" in lowered or "not a bot" in lowered:
+        is_youtube = "youtube.com" in url.lower() or "youtu.be" in url.lower()
+        empty_youtube_result = is_youtube and (not detail or stdout.strip().lower() == "null")
+        if empty_youtube_result or "sign in to confirm you" in lowered or "not a bot" in lowered:
             return (
                 "YouTube 要求登录确认不是机器人。请点击“启动 Chrome”，在打开的专用 Chrome 登录 YouTube，"
                 "完成验证后保持窗口打开，再重新解析。"

@@ -344,6 +344,19 @@ def test_probe_video_info_explains_youtube_bot_verification_instead_of_json_erro
             raise AssertionError("Expected a friendly YouTube verification error")
 
 
+def test_probe_video_info_treats_empty_youtube_result_as_verification_failure() -> None:
+    service = YtDlpService(binary_name="yt-dlp")
+    completed = CompletedProcess(args=["yt-dlp"], returncode=0, stdout="", stderr="")
+
+    with patch("video2local.downloader.subprocess.run", return_value=completed):
+        try:
+            service.probe_video_info(url="https://youtu.be/IVYL3LU_rDs?si=9l6AWalqCWfSobXP")
+        except RuntimeError as exc:
+            assert "登录确认不是机器人" in str(exc)
+        else:
+            raise AssertionError("Expected a friendly YouTube verification error")
+
+
 def test_build_command_enables_node_runtime_for_youtube(tmp_path: Path) -> None:
     service = YtDlpService(binary_name="yt-dlp")
     request = DownloadRequest(
