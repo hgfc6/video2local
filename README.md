@@ -31,7 +31,7 @@ Video2Local 是一个 Python 桌面工具，用于将网页视频归档到本地
 
 Bilibili 如需账号权限范围内的 1440P、4K 等版本，先在专用 Chrome 登录 Bilibili 后再解析；未登录时按匿名权限解析。
 
-YouTube 当前只支持单视频链接；可用格式以当前账号、地区和视频权限实际返回的版本为准。遇到“YouTube 要求登录确认不是机器人”时，点击 YouTube 工作台的“启动 Chrome 并登录”，在新开的专用 Chrome 登录 YouTube 并完成验证后保持窗口打开，再重新解析。该 Chrome 使用独立配置目录，不会修改日常 Chrome。
+YouTube 当前只支持单视频链接；可用格式以当前账号、地区和视频权限实际返回的版本为准。YouTube 解析需要 Node.js 与 yt-dlp 官方 EJS 组件，项目依赖会自动安装后者。遇到“YouTube 要求登录确认不是机器人”时，点击 YouTube 工作台的“启动 Chrome 并登录”，在新开的专用 Chrome 登录 YouTube 并完成验证后保持窗口打开，再重新解析。该 Chrome 使用独立配置目录，不会修改日常 Chrome。
 
 ### 3. 批量同步
 
