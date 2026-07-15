@@ -1128,6 +1128,76 @@ def test_parse_share_text_returns_metadata_and_variants_without_login(tmp_path: 
     assert result.variants[0].file_size == 2086404
 
 
+def test_parse_share_text_returns_download_all_option_for_image_post(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    runtime = AppRuntime(settings=settings)
+    payload = {
+        "aweme_detail": {
+            "aweme_id": "7651428709099242128",
+            "desc": "分享图文",
+            "author": {"nickname": "香菜严选"},
+            "images": [
+                {"url_list": ["https://img.example.com/one.jpg"]},
+                {"url_list": ["https://img.example.com/two.jpg"]},
+            ],
+        }
+    }
+
+    with patch(
+        "video2local.app_runtime.DouyinPublicSession.fetch_share_aweme_detail",
+        return_value=("https://www.douyin.com/note/7651428709099242128", payload),
+    ):
+        result = runtime.parse_share_text("https://v.douyin.com/example/")
+
+    assert result.metadata.image_urls == (
+        "https://img.example.com/one.jpg",
+        "https://img.example.com/two.jpg",
+    )
+    assert result.variants[0].variant_id == "image_post"
+    assert result.variants[0].quality_label == "图文（2 张）"
+
+
+def test_download_share_variant_downloads_every_image_in_image_post(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    runtime = AppRuntime(settings=settings)
+    output_dir = tmp_path / "output"
+    runtime.set_output_root(output_dir)
+    runtime.set_flat_output(True)
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.SHARE_LINK,
+        video_id="7651428709099242128",
+        title="#分享图文",
+        author_name="香菜严选",
+        page_url="https://www.douyin.com/note/7651428709099242128",
+        download_url="https://img.example.com/one.jpg",
+        image_urls=("https://img.example.com/one.jpg", "https://img.example.com/two.jpg"),
+    )
+    variant = VideoVariant(
+        variant_id="image_post",
+        quality_label="图文（2 张）",
+        codec_label="图片",
+        bit_rate=None,
+        file_size=None,
+        width=None,
+        height=None,
+        download_url=metadata.download_url,
+    )
+    parse_result = ShareParseResult(
+        provider_id="native",
+        source_url="https://v.douyin.com/example/",
+        canonical_url=metadata.page_url,
+        metadata=metadata,
+        variants=[variant],
+    )
+
+    with patch.object(runtime.downloader, "download_images", return_value=[str(output_dir / "分享图文-7651428709099242128-001.jpg"), str(output_dir / "分享图文-7651428709099242128-002.jpg")]) as download_images:
+        result = runtime.download_share_variant(parse_result, "image_post")
+
+    assert result.local_path.endswith("-002.jpg")
+    assert download_images.call_args.kwargs["filename_stem"] == "分享图文-7651428709099242128"
+
+
 def test_parse_share_text_prefers_signed_web_api_variants_when_available(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     runtime = AppRuntime(settings=settings)

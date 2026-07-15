@@ -106,6 +106,13 @@ class AppRuntime:
             return sources[0]
         if len(sources) > 1:
             raise RuntimeError("检测到多个可同步内容页，请只保留当前工作台对应的一个收藏页或作品页后重试")
+        active_platform_domain = {
+            "douyin": "douyin.com",
+            "bilibili": "bilibili.com",
+        }.get(self.active_platform or "")
+        if active_platform_domain and any(active_platform_domain in page_url for page_url in page_urls):
+            platform_name = "抖音" if self.active_platform == "douyin" else "Bilibili"
+            raise RuntimeError(f"当前 {platform_name} 页面不受支持，请打开收藏夹或 UP 主投稿页后再开始")
         if all_sources and self.active_platform is not None:
             platform_name = "抖音" if all_sources[0].platform == "douyin" else "Bilibili"
             raise RuntimeError(f"当前工作台为其他平台，请先切换到 {platform_name}")
@@ -166,7 +173,7 @@ class AppRuntime:
         cookies_path = self.browser_session.export_cookies(self.settings.paths.data_dir / "yt-dlp-cookies.txt")
         candidate_urls = self._collect_candidate_urls(source)
         kukutool_resolutions = (
-            self._resolve_kukutool_preview_candidates(candidate_urls)
+            self._resolve_kukutool_preview_candidates([url for url in candidate_urls if "/video/" in url])
             if source.platform == "douyin"
             else {}
         )
@@ -256,7 +263,18 @@ class AppRuntime:
 
         target_dir = self.output_root / "_smoke_test"
         target_dir.mkdir(parents=True, exist_ok=True)
-        _, local_path = self.downloader.download(metadata, target_dir, cookies_file=cookies_path if source.platform != "douyin" else None)
+        if metadata.image_urls:
+            filename_stem = self.archive_manager.build_filename_stem(
+                video_id=metadata.video_id,
+                title=metadata.title,
+            )
+            local_path = self.downloader.download_images(
+                metadata,
+                target_dir,
+                filename_stem=filename_stem,
+            )[0]
+        else:
+            _, local_path = self.downloader.download(metadata, target_dir, cookies_file=cookies_path if source.platform != "douyin" else None)
         return SampleDownloadResult(metadata=metadata, local_path=local_path)
 
     def parse_share_text(self, raw_text: str) -> ShareParseResult:
@@ -270,19 +288,36 @@ class AppRuntime:
             source_type=SourceType.SHARE_LINK,
             page_url=resolution.canonical_url,
         )
-        variants = self._tag_variants(
-            self.adapter.parse_share_variants(resolution.payload),
-            resolution.provider_id,
-        )
+        if metadata.image_urls:
+            variants = [
+                VideoVariant(
+                    variant_id="image_post",
+                    quality_label=f"图文（{len(metadata.image_urls)} 张）",
+                    codec_label="图片",
+                    bit_rate=None,
+                    file_size=None,
+                    width=None,
+                    height=None,
+                    download_url=metadata.download_url,
+                    is_recommended=True,
+                    provider_id=resolution.provider_id,
+                )
+            ]
+        else:
+            variants = self._tag_variants(
+                self.adapter.parse_share_variants(resolution.payload),
+                resolution.provider_id,
+            )
         if not variants:
             raise RuntimeError("未解析到可下载版本")
-        variants = [
-            replace(
-                variant,
-                file_size=variant.file_size or self.public_session.probe_content_length(variant.download_url),
-            )
-            for variant in variants
-        ]
+        if not metadata.image_urls:
+            variants = [
+                replace(
+                    variant,
+                    file_size=variant.file_size or self.public_session.probe_content_length(variant.download_url),
+                )
+                for variant in variants
+            ]
         return ShareParseResult(
             provider_id=resolution.provider_id,
             source_url=share_url,
@@ -311,18 +346,31 @@ class AppRuntime:
                 / self.archive_manager.safe_name(metadata.author_name)
             )
         target_dir.mkdir(parents=True, exist_ok=True)
-        filename_stem = self.archive_manager.build_filename_stem(
-            video_id=metadata.video_id,
-            title=metadata.title,
-            suffix=variant.quality_label,
-        )
-        file_ext, local_path = self.downloader.download(
-            metadata,
-            target_dir,
-            cookies_file=self._export_browser_cookies() if metadata.platform == "bilibili" else None,
-            filename_stem=filename_stem,
-            format_selector=variant.format_selector,
-        )
+        if metadata.image_urls:
+            filename_stem = self.archive_manager.build_filename_stem(
+                video_id=metadata.video_id,
+                title=metadata.title,
+            )
+            local_path = "; ".join(
+                self.downloader.download_images(
+                    metadata,
+                    target_dir,
+                    filename_stem=filename_stem,
+                )
+            )
+        else:
+            filename_stem = self.archive_manager.build_filename_stem(
+                video_id=metadata.video_id,
+                title=metadata.title,
+                suffix=variant.quality_label,
+            )
+            _, local_path = self.downloader.download(
+                metadata,
+                target_dir,
+                cookies_file=self._export_browser_cookies() if metadata.platform == "bilibili" else None,
+                filename_stem=filename_stem,
+                format_selector=variant.format_selector,
+            )
         return ShareVariantDownloadResult(
             metadata=parse_result.metadata,
             variant=variant,
@@ -532,7 +580,8 @@ class AppRuntime:
         merged_variants: list[VideoVariant] = []
         resolver_errors: list[Exception] = []
 
-        if "kukutool" in self.resolver_sources and self.settings.share_resolvers.enable_kukutool_fallback:
+        is_image_post = "/note/" in page_url
+        if not is_image_post and "kukutool" in self.resolver_sources and self.settings.share_resolvers.enable_kukutool_fallback:
             try:
                 if isinstance(kukutool_resolution, Exception):
                     raise kukutool_resolution
@@ -552,7 +601,7 @@ class AppRuntime:
                 resolver_errors.append(exc)
                 provider_labels.append("kukutool(失败)")
 
-        if "native" in self.resolver_sources:
+        if "native" in self.resolver_sources or is_image_post:
             try:
                 detail_payload = self.browser_session.fetch_douyin_aweme_detail(page_url)
                 native_metadata = self.adapter.parse_aweme_detail(

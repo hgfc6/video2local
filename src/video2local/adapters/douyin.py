@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from video2local.adapters.base import SourceDescriptor
 from video2local.domain import SourceType, VideoMetadata, VideoVariant
 
-VIDEO_URL_RE = re.compile(r'https://www\.douyin\.com/video/\d+|/video/\d+')
+CONTENT_URL_RE = re.compile(r'https://www\.douyin\.com/(?:video|note)/\d+|/(?:video|note)/\d+')
 SHARE_URL_RE = re.compile(r"https?://[^\s]+")
 
 
@@ -33,7 +33,7 @@ class DouyinAdapter:
     def collect_candidate_urls(self, html: str) -> list[str]:
         seen: set[str] = set()
         urls: list[str] = []
-        for match in VIDEO_URL_RE.findall(html):
+        for match in CONTENT_URL_RE.findall(html):
             url = match if match.startswith("http") else f"https://www.douyin.com{match}"
             if url in seen:
                 continue
@@ -73,6 +73,7 @@ class DouyinAdapter:
         detail = payload["aweme_detail"]
         author = detail.get("author") or {}
         video = detail.get("video") or {}
+        image_urls = self._extract_image_urls(detail)
         video_id = str(detail["aweme_id"])
         title = detail.get("desc") or video_id
         author_name = (
@@ -92,9 +93,38 @@ class DouyinAdapter:
             title=title,
             author_name=author_name,
             page_url=page_url,
-            download_url=self._select_best_media_url(video),
+            download_url=self._select_best_media_url(video) if not image_urls else image_urls[0],
             duration_seconds=duration_seconds,
+            image_urls=tuple(image_urls),
         )
+
+    def _extract_image_urls(self, detail: dict) -> list[str]:
+        """Extract original image addresses while preserving the post order."""
+        image_items = list(detail.get("images") or [])
+        image_items.extend((detail.get("image_post_info") or {}).get("images") or [])
+        urls: list[str] = []
+        seen: set[str] = set()
+        for item in image_items:
+            if not isinstance(item, dict):
+                continue
+            candidates = (item, item.get("display_image") or {}, item.get("origin_image") or {})
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                values = candidate.get("url_list") or []
+                if isinstance(candidate.get("url"), str):
+                    values = [candidate["url"], *values]
+                selected_url = None
+                for url in values:
+                    if not isinstance(url, str) or not url.startswith(("http://", "https://")) or url in seen:
+                        continue
+                    selected_url = url
+                    break
+                if selected_url is not None:
+                    seen.add(selected_url)
+                    urls.append(selected_url)
+                    break
+        return urls
 
     def parse_share_variants(self, payload: dict) -> list[VideoVariant]:
         video = (payload.get("aweme_detail") or {}).get("video") or {}

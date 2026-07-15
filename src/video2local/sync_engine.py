@@ -87,7 +87,10 @@ class SyncEngine:
 
             metadata = item
             target_path = self.archive_manager.build_target_path(metadata, "mp4")
-            if target_path.exists():
+            image_stem = self.archive_manager.build_filename_stem(video_id=metadata.video_id, title=metadata.title)
+            image_paths = [target_path.parent / f"{image_stem}-{index:03d}.jpg" for index in range(1, len(metadata.image_urls) + 1)]
+            is_image_post = bool(metadata.image_urls)
+            if (is_image_post and image_paths and all(path.exists() for path in image_paths)) or (not is_image_post and target_path.exists()):
                 skipped_count += 1
                 report_rows.append(
                     self._report_row(
@@ -123,11 +126,19 @@ class SyncEngine:
                 for attempt in range(retry_count + 1):
                     attempt_count = attempt + 1
                     try:
-                        file_ext, local_path = self.downloader.download(
-                            metadata,
-                            target_path.parent,
-                            cookies_file=cookies_file,
-                        )
+                        if is_image_post:
+                            local_paths = self.downloader.download_images(
+                                metadata,
+                                target_path.parent,
+                                filename_stem=image_stem,
+                            )
+                            local_path = "; ".join(local_paths)
+                        else:
+                            _, local_path = self.downloader.download(
+                                metadata,
+                                target_path.parent,
+                                cookies_file=cookies_file,
+                            )
                         downloaded_count += 1
                         report_rows.append(
                             self._report_row(

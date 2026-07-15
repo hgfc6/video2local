@@ -22,6 +22,15 @@ def test_detect_source_recognizes_up_video_page_and_favorites_page() -> None:
     assert favorites_source.source_type == SourceType.FAVORITES
 
 
+def test_detect_source_recognizes_current_up_upload_video_page() -> None:
+    adapter = BilibiliAdapter()
+
+    source = adapter.detect_source("https://space.bilibili.com/123456/upload/video?from=space")
+
+    assert source is not None
+    assert source.source_type == SourceType.AUTHOR_VIDEOS
+
+
 def test_collect_candidate_urls_deduplicates_standard_video_links() -> None:
     adapter = BilibiliAdapter()
 

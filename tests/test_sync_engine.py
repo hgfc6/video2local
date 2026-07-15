@@ -19,6 +19,21 @@ class FakeDownloader:
         self.downloads.append(metadata.video_id)
         return ("mp4", str(target_dir / f"{metadata.title} [{metadata.video_id}].mp4"))
 
+    def download_images(
+        self,
+        metadata: VideoMetadata,
+        target_dir: Path,
+        *,
+        filename_stem: str,
+    ) -> list[str]:
+        self.downloads.append(metadata.video_id)
+        paths = []
+        for index, _ in enumerate(metadata.image_urls, start=1):
+            path = target_dir / f"{filename_stem}-{index:03d}.jpg"
+            path.write_bytes(b"image")
+            paths.append(str(path))
+        return paths
+
 
 def test_sync_engine_skips_existing_video_and_downloads_new_one(tmp_path: Path) -> None:
     downloader = FakeDownloader(downloads=[])
@@ -54,6 +69,39 @@ def test_sync_engine_skips_existing_video_and_downloads_new_one(tmp_path: Path) 
     assert summary.skipped_count == 1
     assert summary.downloaded_count == 1
     assert downloader.downloads == ["735002"]
+
+
+def test_sync_engine_downloads_every_image_in_a_douyin_post(tmp_path: Path) -> None:
+    downloader = FakeDownloader(downloads=[])
+    archive = ArchiveManager(download_root=tmp_path, flatten_into_root=True)
+    engine = SyncEngine(repository=None, downloader=downloader, archive_manager=archive)
+    image_post = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="735003",
+        title="#图文作品",
+        author_name="张三",
+        page_url="https://www.douyin.com/note/735003",
+        download_url="https://img.example.com/one.jpg",
+        image_urls=(
+            "https://img.example.com/one.jpg",
+            "https://img.example.com/two.jpg",
+            "https://img.example.com/three.jpg",
+        ),
+    )
+
+    summary = engine.sync_items([image_post])
+
+    assert summary.downloaded_count == 1
+    assert downloader.downloads == ["735003"]
+    assert (tmp_path / "图文作品-735003-001.jpg").exists()
+    assert (tmp_path / "图文作品-735003-002.jpg").exists()
+    assert (tmp_path / "图文作品-735003-003.jpg").exists()
+
+    second_summary = engine.sync_items([image_post])
+
+    assert second_summary.skipped_count == 1
+    assert downloader.downloads == ["735003"]
 
 
 def test_sync_engine_reports_progress_for_each_processed_item(tmp_path: Path) -> None:

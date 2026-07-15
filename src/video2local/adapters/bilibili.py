@@ -19,7 +19,10 @@ class BilibiliAdapter:
         if host == "space.bilibili.com":
             if path.endswith("/favlist"):
                 return SourceDescriptor(self.platform_name, SourceType.FAVORITES, page_url)
-            if path.endswith("/video"):
+            if path.endswith("/video") and (
+                re.fullmatch(r"/\d+/video", path) is not None
+                or re.fullmatch(r"/\d+/upload/video", path) is not None
+            ):
                 return SourceDescriptor(self.platform_name, SourceType.AUTHOR_VIDEOS, page_url)
         if host in {"www.bilibili.com", "bilibili.com"} and path in {"/medialist/play/favlist", "/list/favorite"}:
             return SourceDescriptor(self.platform_name, SourceType.FAVORITES, page_url)

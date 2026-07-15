@@ -30,6 +30,7 @@ class VideoMetadata:
     download_url: str
     duration_seconds: int | None = None
     format_selector: str | None = None
+    image_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

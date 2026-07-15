@@ -107,6 +107,43 @@ def test_collect_candidate_urls_returns_unique_absolute_video_urls() -> None:
     ]
 
 
+def test_collect_candidate_urls_includes_image_post_urls_but_not_live_urls() -> None:
+    adapter = DouyinAdapter()
+
+    urls = adapter.collect_candidate_urls(
+        '<a href="/note/735003">image</a><a href="https://live.douyin.com/123">live</a>'
+    )
+
+    assert urls == ["https://www.douyin.com/note/735003"]
+
+
+def test_parse_aweme_detail_extracts_image_post_urls() -> None:
+    adapter = DouyinAdapter()
+    payload = {
+        "aweme_detail": {
+            "aweme_id": "735003",
+            "desc": "图文作品",
+            "author": {"nickname": "作者"},
+            "images": [
+                {"url_list": ["https://img.example.com/one.jpg"]},
+                {"display_image": {"url_list": ["https://img.example.com/two.jpg"]}},
+            ],
+        }
+    }
+
+    metadata = adapter.parse_aweme_detail(
+        payload,
+        source_type=SourceType.FAVORITES,
+        page_url="https://www.douyin.com/note/735003",
+    )
+
+    assert metadata.download_url == "https://img.example.com/one.jpg"
+    assert metadata.image_urls == (
+        "https://img.example.com/one.jpg",
+        "https://img.example.com/two.jpg",
+    )
+
+
 def test_extract_share_url_pulls_short_link_from_raw_douyin_share_text() -> None:
     adapter = DouyinAdapter()
     share_text = "9.76 复制打开抖音，看看【香菜严选的作品】  https://v.douyin.com/5MF6Y_tP8nk/ 08/05 X@Z.Mj :5pm wse:/"

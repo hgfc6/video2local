@@ -280,15 +280,36 @@ class YtDlpService:
             filename_stem=filename_stem,
         )
         output_path = request.download_dir / f"{request.filename_stem}.mp4"
+        self._download_direct_url(metadata.download_url, output_path, metadata.page_url)
+        return "mp4", str(output_path)
+
+    def download_images(
+        self,
+        metadata: VideoMetadata,
+        target_dir: Path,
+        *,
+        filename_stem: str,
+    ) -> list[str]:
+        if not metadata.image_urls:
+            raise RuntimeError("图文作品未找到可下载的原图地址")
+        local_paths: list[str] = []
+        for index, image_url in enumerate(metadata.image_urls, start=1):
+            output_path = target_dir / f"{filename_stem}-{index:03d}.jpg"
+            if not output_path.exists():
+                self._download_direct_url(image_url, output_path, metadata.page_url)
+            local_paths.append(str(output_path))
+        return local_paths
+
+    def _download_direct_url(self, url: str, output_path: Path, page_url: str) -> None:
         http_request = Request(
-            metadata.download_url,
+            url,
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/138.0.0.0 Safari/537.36"
                 ),
-                "Referer": metadata.page_url,
+                "Referer": page_url,
             },
         )
         try:
@@ -304,4 +325,3 @@ class YtDlpService:
         except Exception:
             output_path.unlink(missing_ok=True)
             raise
-        return "mp4", str(output_path)

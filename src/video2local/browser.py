@@ -23,7 +23,7 @@ COMMON_CHROME_PATHS = (
     Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
     Path(os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")),
 )
-VIDEO_ID_RE = re.compile(r"/video/(\d+)")
+VIDEO_ID_RE = re.compile(r"/(?:video|note)/(\d+)")
 KUKUTOOL_QUALITY_BUTTON_RE = re.compile(
     r"^下载\s*(?P<quality>.+?)\s*\((?P<size>[\d.]+)\s*(?P<unit>KB|MB|GB)\)$"
 )
