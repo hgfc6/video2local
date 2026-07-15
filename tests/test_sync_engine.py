@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from video2local.archive import ArchiveManager
-from video2local.domain import SourceType, SyncProgress, VideoMetadata
+from video2local.domain import SkippedSyncItem, SourceType, SyncProgress, VideoMetadata
 from video2local.sync_engine import SyncEngine
 
 
@@ -278,3 +278,36 @@ def test_sync_engine_exports_result_report(tmp_path: Path) -> None:
     assert "downloaded" in report_text
     assert "735041" in report_text
     assert "failed" in report_text
+
+
+def test_sync_engine_skips_unavailable_item_and_records_its_page_url(tmp_path: Path) -> None:
+    downloader = FakeDownloader(downloads=[])
+    archive = ArchiveManager(download_root=tmp_path)
+    engine = SyncEngine(repository=None, downloader=downloader, archive_manager=archive)
+    unavailable = SkippedSyncItem(
+        platform="bilibili",
+        source_type=SourceType.FAVORITES,
+        video_id="BV1expired",
+        page_url="https://www.bilibili.com/video/BV1expired",
+        error_message="视频已失效、删除或当前账号无权访问。原始错误: HTTP Error 404",
+        stage="sync_metadata",
+    )
+    normal = VideoMetadata(
+        platform="bilibili",
+        source_type=SourceType.FAVORITES,
+        video_id="BV1normal",
+        title="正常视频",
+        author_name="测试UP",
+        page_url="https://www.bilibili.com/video/BV1normal",
+        download_url="https://www.bilibili.com/video/BV1normal",
+    )
+
+    summary = engine.sync_items([unavailable, normal], report_dir=tmp_path)
+
+    assert summary.skipped_count == 1
+    assert summary.downloaded_count == 1
+    assert summary.report_path is not None
+    report_text = Path(summary.report_path).read_text(encoding="utf-8")
+    assert "BV1expired" in report_text
+    assert "页面链接: https://www.bilibili.com/video/BV1expired" in report_text
+    assert "错误详情: 视频已失效、删除或当前账号无权访问" in report_text

@@ -91,6 +91,22 @@ class SyncPreviewItem:
 
 
 @dataclass(frozen=True)
+class SkippedSyncItem:
+    """A discovered page that cannot be resolved and must not stop the batch."""
+
+    platform: str
+    source_type: SourceType
+    video_id: str
+    page_url: str
+    error_message: str
+    title: str | None = None
+    author_name: str = "unknown"
+    stage: str = "metadata"
+
+
+@dataclass(frozen=True)
 class SyncPreviewResult:
     source: "SourceDescriptor"
     items: list[SyncPreviewItem]
+    skipped_items: list[SkippedSyncItem] | None = None
+    report_path: str | None = None

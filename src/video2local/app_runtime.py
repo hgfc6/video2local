@@ -12,7 +12,7 @@ from video2local.adapters.douyin import DouyinAdapter
 from video2local.browser import ChromeLaunchSpec, ChromeRemoteSession, DouyinPublicSession, DouyinSignedSession, KukutoolSession
 from video2local.config import AppSettings
 from video2local.downloader import YtDlpService
-from video2local.domain import SampleDownloadResult, ShareParseResult, ShareVariantDownloadResult, SourceType, SyncPreviewItem, SyncPreviewResult, SyncProgress, SyncRunStatus, VideoMetadata, VideoVariant
+from video2local.domain import SampleDownloadResult, ShareParseResult, ShareVariantDownloadResult, SkippedSyncItem, SourceType, SyncPreviewItem, SyncPreviewResult, SyncProgress, SyncRunStatus, VideoMetadata, VideoVariant
 from video2local.resolvers import KukutoolResolver, NativeDouyinResolver, ResolverChain
 from video2local.sync_engine import SyncEngine, SyncSummary
 
@@ -124,7 +124,7 @@ class AppRuntime:
                 progress_callback=self._store_progress,
                 cookies_file=cookies_path,
                 retry_count=self.retry_count,
-                report_dir=self.output_root / "_sync_reports",
+                report_dir=self.output_root,
                 discovered_count=len(candidate_urls),
             )
             self._latest_sync_run = {
@@ -157,22 +157,33 @@ class AppRuntime:
             else {}
         )
         items: list[SyncPreviewItem] = []
+        skipped_items: list[SkippedSyncItem] = []
         seen_video_keys: set[tuple[str, str]] = set()
         for url in candidate_urls:
-            preview_item = self._build_preview_item(
-                page_url=url,
-                source=source,
-                cookies_path=cookies_path,
-                kukutool_resolution=kukutool_resolutions.get(url),
-            )
+            try:
+                preview_item = self._build_preview_item(
+                    page_url=url,
+                    source=source,
+                    cookies_path=cookies_path,
+                    kukutool_resolution=kukutool_resolutions.get(url),
+                )
+            except Exception as exc:
+                skipped_items.append(self._build_skipped_item(source, url, exc, stage="preview_metadata"))
+                continue
             video_key = (preview_item.metadata.platform, preview_item.metadata.video_id)
             if video_key in seen_video_keys:
                 continue
             seen_video_keys.add(video_key)
             items.append(preview_item)
-        if not items:
+        if not items and not skipped_items:
             raise RuntimeError("当前页面未发现可下载视频，请确认已登录，并等待作品或收藏列表加载完成后再试。")
-        return SyncPreviewResult(source=source, items=items)
+        report_path = self.sync_engine.write_skipped_items_report(skipped_items, self.output_root)
+        return SyncPreviewResult(
+            source=source,
+            items=items,
+            skipped_items=skipped_items,
+            report_path=report_path,
+        )
 
     def _resolve_kukutool_preview_candidates(self, candidate_urls: list[str]) -> dict[str, object]:
         if "kukutool" not in self.resolver_sources or not self.settings.share_resolvers.enable_kukutool_fallback:
@@ -337,11 +348,14 @@ class AppRuntime:
         items: list[VideoMetadata] = []
         seen_video_keys: set[tuple[str, str]] = set()
         for url in self._collect_candidate_urls(source):
-            preview_item = self._build_preview_item(
-                page_url=url,
-                source=source,
-                cookies_path=cookies_path,
-            )
+            try:
+                preview_item = self._build_preview_item(
+                    page_url=url,
+                    source=source,
+                    cookies_path=cookies_path,
+                )
+            except Exception:
+                continue
             video_key = (preview_item.metadata.platform, preview_item.metadata.video_id)
             if video_key in seen_video_keys:
                 continue
@@ -361,11 +375,16 @@ class AppRuntime:
         seen_video_keys: set[tuple[str, str]] = set()
         yielded = 0
         for url in candidate_urls:
-            preview_item = self._build_preview_item(
-                page_url=url,
-                source=source,
-                cookies_path=cookies_path,
-            )
+            try:
+                preview_item = self._build_preview_item(
+                    page_url=url,
+                    source=source,
+                    cookies_path=cookies_path,
+                )
+            except Exception as exc:
+                yielded += 1
+                yield self._build_skipped_item(source, url, exc, stage="sync_metadata")
+                continue
             video_key = (preview_item.metadata.platform, preview_item.metadata.video_id)
             if video_key in seen_video_keys:
                 continue
@@ -379,7 +398,8 @@ class AppRuntime:
         candidate_urls: list[str] = []
         seen_urls: set[str] = set()
         adapter = self.adapter if source.platform == "douyin" else self.bilibili_adapter
-        for html in self.browser_session.fetch_active_page_html_snapshots():
+        snapshot_options = {"scroll_rounds": 8, "pause_ms": 700} if source.platform == "bilibili" else {}
+        for html in self.browser_session.fetch_active_page_html_snapshots(**snapshot_options):
             for url in adapter.collect_candidate_urls(html):
                 if url in seen_urls:
                     continue
@@ -388,6 +408,30 @@ class AppRuntime:
         if self.sync_limit is not None:
             candidate_urls = candidate_urls[: self.sync_limit]
         return candidate_urls
+
+    def _build_skipped_item(
+        self,
+        source: SourceDescriptor,
+        page_url: str,
+        exc: Exception,
+        *,
+        stage: str,
+    ) -> SkippedSyncItem:
+        raw_message = str(exc).strip() or exc.__class__.__name__
+        unavailable_markers = ("404", "not available", "已失效", "已删除", "不存在", "无权限", "需要登录")
+        if source.platform == "bilibili" and any(marker.lower() in raw_message.lower() for marker in unavailable_markers):
+            message = f"视频已失效、删除或当前账号无权访问。原始错误: {raw_message}"
+        else:
+            message = f"视频元数据解析失败。原始错误: {raw_message}"
+        video_id = page_url.rstrip("/").rsplit("/", maxsplit=1)[-1] or "unknown"
+        return SkippedSyncItem(
+            platform=source.platform,
+            source_type=source.source_type,
+            video_id=video_id,
+            page_url=page_url,
+            error_message=message,
+            stage=stage,
+        )
 
     def _build_preview_item(
         self,

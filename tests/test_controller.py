@@ -240,7 +240,7 @@ def test_main_controller_reports_preview_table_summary_after_preview() -> None:
     controller.wait_for_sync(timeout=1.0)
 
     assert controller.status_text == "预览完成"
-    assert controller.detail_text.endswith("共预览 1 条")
+    assert controller.detail_text.endswith("共预览 1 条，跳过 0 条")
 
 
 def test_main_controller_can_preview_sync_items() -> None:

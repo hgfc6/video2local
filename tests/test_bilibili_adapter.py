@@ -51,6 +51,14 @@ def test_collect_candidate_urls_accepts_relative_and_protocol_relative_links() -
     ]
 
 
+def test_collect_candidate_urls_accepts_json_escaped_video_links() -> None:
+    adapter = BilibiliAdapter()
+
+    urls = adapter.collect_candidate_urls('{"jump_url":"https:\\/\\/www.bilibili.com\\/video\\/BV1xx411c7mD"}')
+
+    assert urls == ["https://www.bilibili.com/video/BV1xx411c7mD"]
+
+
 def test_parse_video_info_builds_highest_video_and_best_audio_variants() -> None:
     adapter = BilibiliAdapter()
     payload = {

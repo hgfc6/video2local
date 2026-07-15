@@ -26,6 +26,8 @@ class BilibiliAdapter:
         return None
 
     def collect_candidate_urls(self, html: str) -> list[str]:
+        # Bilibili's hydrated page state often escapes URLs as https:\/\/... .
+        html = html.replace("\\/", "/")
         seen: set[str] = set()
         urls: list[str] = []
         for url in BILIBILI_URL_RE.findall(html):

@@ -703,7 +703,7 @@ def test_start_sync_passes_retry_and_report_dir_to_sync_engine(tmp_path: Path) -
                         runtime.start_sync()
 
     assert sync_mock.call_args.kwargs["retry_count"] == 2
-    assert sync_mock.call_args.kwargs["report_dir"] == runtime.output_root / "_sync_reports"
+    assert sync_mock.call_args.kwargs["report_dir"] == runtime.output_root
 
 
 def test_start_sync_streams_douyin_items_without_pre_resolving_everything(tmp_path: Path) -> None:
@@ -1437,6 +1437,81 @@ def test_preview_bilibili_author_page_uses_login_cookies_and_shows_selected_qual
     assert preview.items[0].metadata.format_selector == "80+30280"
     assert probe_mock.call_args.kwargs["cookies_file"] == cookies_path
     kukutool_preview_mock.assert_not_called()
+
+
+def test_preview_bilibili_skips_expired_video_and_writes_details_to_output_root(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    cookies_path = tmp_path / "yt-dlp-cookies.txt"
+    working_payload = {
+        "id": "BV1ok411c7mD",
+        "title": "正常视频",
+        "uploader": "测试UP",
+        "webpage_url": "https://www.bilibili.com/video/BV1ok411c7mD",
+        "formats": [{"format_id": "80", "height": 1080, "vcodec": "avc1", "acodec": "mp4a", "tbr": 3600}],
+    }
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://space.bilibili.com/123456/favlist?fid=987654"):
+        with patch(
+            "video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots",
+            return_value=[
+                '<a href="/video/BV1bad411c7mD">expired</a>'
+                '<a href="/video/BV1ok411c7mD">working</a>'
+            ],
+        ):
+            with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+                with patch.object(
+                    runtime.downloader,
+                    "probe_video_info",
+                    side_effect=[RuntimeError("ERROR: [BiliBili] video is not available"), working_payload],
+                ):
+                    preview = runtime.preview_sync()
+
+    assert [item.metadata.video_id for item in preview.items] == ["BV1ok411c7mD"]
+    assert preview.skipped_items is not None
+    assert len(preview.skipped_items) == 1
+    assert preview.report_path is not None
+    report_text = Path(preview.report_path).read_text(encoding="utf-8")
+    assert "BV1bad411c7mD" in report_text
+    assert "视频已失效、删除或当前账号无权访问" in report_text
+
+
+def test_start_sync_bilibili_skips_expired_video_and_continues_next_item(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    cookies_path = tmp_path / "yt-dlp-cookies.txt"
+    working_payload = {
+        "id": "BV1ok411c7mD",
+        "title": "正常视频",
+        "uploader": "测试UP",
+        "webpage_url": "https://www.bilibili.com/video/BV1ok411c7mD",
+        "formats": [{"format_id": "80", "height": 1080, "vcodec": "avc1", "acodec": "mp4a", "tbr": 3600}],
+    }
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://space.bilibili.com/123456/favlist?fid=987654"):
+        with patch(
+            "video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots",
+            return_value=[
+                '<a href="/video/BV1bad411c7mD">expired</a>'
+                '<a href="/video/BV1ok411c7mD">working</a>'
+            ],
+        ):
+            with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+                with patch.object(
+                    runtime.downloader,
+                    "probe_video_info",
+                    side_effect=[RuntimeError("ERROR: [BiliBili] video is not available"), working_payload],
+                ):
+                    with patch.object(
+                        runtime.downloader,
+                        "download",
+                        return_value=("mp4", str(tmp_path / "正常视频-BV1ok411c7mD.mp4")),
+                    ) as download_mock:
+                        summary = runtime.start_sync()
+
+    assert summary.skipped_count == 1
+    assert summary.downloaded_count == 1
+    assert download_mock.call_args.args[0].video_id == "BV1ok411c7mD"
+    assert summary.report_path is not None
+    assert "BV1bad411c7mD" in Path(summary.report_path).read_text(encoding="utf-8")
 
 
 def test_start_sync_bilibili_page_passes_selected_format_and_cookies_to_queue(tmp_path: Path) -> None:

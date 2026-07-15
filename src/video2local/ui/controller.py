@@ -341,13 +341,17 @@ class MainController:
 
     def _apply_sync_preview(self, result: object) -> None:
         items = list(getattr(result, "items", []))
+        skipped_items = list(getattr(result, "skipped_items", []) or [])
         source = getattr(result, "source")
         with self._lock:
             self.sync_preview_items = items
             self.results_mode = "sync_preview"
             self.results_revision += 1
             self.status_text = "预览完成"
-            self.detail_text = f"{source.platform} / {source.source_type.value}，共预览 {len(items)} 条"
+            self.detail_text = (
+                f"{source.platform} / {source.source_type.value}，共预览 {len(items)} 条，"
+                f"跳过 {len(skipped_items)} 条"
+            )
             if items:
                 first_item = items[0]
                 metadata = getattr(first_item, "metadata")
@@ -356,3 +360,6 @@ class MainController:
                 self.summary_text = f"首条预览: {metadata.author_name} / {metadata.title or metadata.video_id} / {provider_summary} / {quality_label}"
             else:
                 self.summary_text = "当前预览为空"
+            report_path = getattr(result, "report_path", None)
+            if report_path:
+                self.summary_text += f"；跳过明细: {report_path}"
