@@ -145,15 +145,18 @@ class MainWindow(QMainWindow):
         self.guide_label.setWordWrap(True)
         self.douyin_platform_button = QPushButton("抖音工作台")
         self.bilibili_platform_button = QPushButton("Bilibili 工作台")
-        for button in (self.douyin_platform_button, self.bilibili_platform_button):
+        self.youtube_platform_button = QPushButton("YouTube 工作台")
+        for button in (self.douyin_platform_button, self.bilibili_platform_button, self.youtube_platform_button):
             button.setObjectName("platformButton")
             button.setCheckable(True)
         self.douyin_platform_button.setChecked(True)
         self.platform_buttons = QButtonGroup(self)
         self.platform_buttons.addButton(self.douyin_platform_button)
         self.platform_buttons.addButton(self.bilibili_platform_button)
+        self.platform_buttons.addButton(self.youtube_platform_button)
         self.douyin_platform_button.clicked.connect(lambda: self.handle_platform_switch("douyin"))
         self.bilibili_platform_button.clicked.connect(lambda: self.handle_platform_switch("bilibili"))
+        self.youtube_platform_button.clicked.connect(lambda: self.handle_platform_switch("youtube"))
         self.output_dir_input = QLineEdit(self.controller.output_dir_text)
         self.output_dir_input.setReadOnly(True)
         self.output_dir_button = QPushButton("选择目录")
@@ -232,6 +235,7 @@ class MainWindow(QMainWindow):
         platform_row.setSpacing(8)
         platform_row.addWidget(self.douyin_platform_button)
         platform_row.addWidget(self.bilibili_platform_button)
+        platform_row.addWidget(self.youtube_platform_button)
         platform_row.addStretch(1)
         hero_layout.addLayout(platform_row)
         hero_layout.addWidget(self.guide_label)
@@ -376,19 +380,29 @@ class MainWindow(QMainWindow):
 
     def _apply_platform_mode(self, platform: str) -> None:
         is_douyin = platform == "douyin"
+        is_bilibili = platform == "bilibili"
+        is_youtube = platform == "youtube"
         self.douyin_platform_button.setChecked(is_douyin)
-        self.bilibili_platform_button.setChecked(not is_douyin)
+        self.bilibili_platform_button.setChecked(is_bilibili)
+        self.youtube_platform_button.setChecked(is_youtube)
         self.resolver_label.setVisible(is_douyin)
         self.resolver_widget.setVisible(is_douyin)
-        self.bilibili_resolver_hint.setVisible(not is_douyin)
+        self.bilibili_resolver_hint.setVisible(is_bilibili or is_youtube)
+        self.sync_group.setVisible(not is_youtube)
         if is_douyin:
             self.sync_hint.setText("打开抖音收藏页或作者作品页。先检查当前页面，再下载首个样本确认链路。")
             self.share_hint.setText("粘贴抖音分享文案或短链，查看各来源的清晰度后下载所选版本。")
             self.share_input.setPlaceholderText("粘贴抖音分享文案、短链或视频链接")
-        else:
+            self.bilibili_resolver_hint.setText("Bilibili 固定使用原生解析和登录 cookies")
+        elif is_bilibili:
             self.sync_hint.setText("打开 Bilibili 收藏夹或 UP 主投稿页。程序使用登录 cookies 获取可用画质。")
             self.share_hint.setText("粘贴 Bilibili 视频链接、b23 短链或分享文案，原生解析后下载所选版本。")
             self.share_input.setPlaceholderText("粘贴 Bilibili 视频链接、b23 短链或分享文案")
+            self.bilibili_resolver_hint.setText("Bilibili 固定使用原生解析和登录 cookies")
+        else:
+            self.share_hint.setText("粘贴 YouTube 视频链接或分享文案，解析可用清晰度后下载所选版本。")
+            self.share_input.setPlaceholderText("粘贴 YouTube 视频链接、youtu.be 短链或分享文案")
+            self.bilibili_resolver_hint.setText("YouTube 固定使用原生解析；登录权限内容可使用专用 Chrome cookies")
 
     def handle_launch(self) -> None:
         self.controller.launch_chrome()

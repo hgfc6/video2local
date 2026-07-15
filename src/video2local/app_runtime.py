@@ -9,6 +9,7 @@ from video2local.archive import ArchiveManager
 from video2local.adapters.base import SourceDescriptor
 from video2local.adapters.bilibili import BilibiliAdapter
 from video2local.adapters.douyin import DouyinAdapter
+from video2local.adapters.youtube import YouTubeAdapter
 from video2local.browser import ChromeLaunchSpec, ChromeRemoteSession, DouyinPublicSession, DouyinSignedSession, KukutoolSession
 from video2local.config import AppSettings
 from video2local.downloader import YtDlpService
@@ -24,6 +25,7 @@ class AppRuntime:
     def __post_init__(self) -> None:
         self.adapter = DouyinAdapter()
         self.bilibili_adapter = BilibiliAdapter()
+        self.youtube_adapter = YouTubeAdapter()
         self.browser_session = ChromeRemoteSession()
         self.signed_session = DouyinSignedSession()
         self.public_session = DouyinPublicSession()
@@ -74,7 +76,7 @@ class AppRuntime:
         self.share_resolver = self._build_share_resolver_chain()
 
     def set_active_platform(self, platform: str) -> None:
-        if platform not in {"douyin", "bilibili"}:
+        if platform not in {"douyin", "bilibili", "youtube"}:
             raise ValueError(f"不支持的平台工作台: {platform}")
         self.active_platform = platform
 
@@ -242,6 +244,8 @@ class AppRuntime:
 
     def parse_share_text(self, raw_text: str) -> ShareParseResult:
         self.ensure_directories()
+        if self._is_youtube_share_text(raw_text):
+            return self._parse_youtube_share_text(raw_text)
         if self._is_bilibili_share_text(raw_text):
             return self._parse_bilibili_share_text(raw_text)
         share_url = self.adapter.extract_share_url(raw_text)
@@ -299,7 +303,7 @@ class AppRuntime:
         file_ext, local_path = self.downloader.download(
             metadata,
             target_dir,
-            cookies_file=self._export_bilibili_cookies() if metadata.platform == "bilibili" else None,
+            cookies_file=self._export_browser_cookies() if metadata.platform in {"bilibili", "youtube"} else None,
             filename_stem=filename_stem,
             format_selector=variant.format_selector,
         )
@@ -313,11 +317,15 @@ class AppRuntime:
         lowered = raw_text.lower()
         return "bilibili.com" in lowered or "b23.tv" in lowered
 
+    def _is_youtube_share_text(self, raw_text: str) -> bool:
+        lowered = raw_text.lower()
+        return "youtube.com" in lowered or "youtu.be" in lowered
+
     def _parse_bilibili_share_text(self, raw_text: str) -> ShareParseResult:
         share_url = self.bilibili_adapter.extract_share_url(raw_text)
         payload = self.downloader.probe_video_info(
             url=share_url,
-            cookies_file=self._export_bilibili_cookies(),
+            cookies_file=self._export_browser_cookies(),
         )
         metadata, variants = self.bilibili_adapter.parse_video_info(
             payload,
@@ -334,12 +342,33 @@ class AppRuntime:
             variants=variants,
         )
 
-    def _export_bilibili_cookies(self) -> Path | None:
-        """Use the dedicated Chrome login when available, but keep anonymous parsing usable."""
+    def _parse_youtube_share_text(self, raw_text: str) -> ShareParseResult:
+        share_url = self.youtube_adapter.extract_share_url(raw_text)
+        payload = self.downloader.probe_video_info(
+            url=share_url,
+            cookies_file=self._export_browser_cookies(),
+        )
+        metadata, variants = self.youtube_adapter.parse_video_info(payload, source_url=share_url)
+        if not variants:
+            raise RuntimeError("YouTube 视频未返回可下载格式，请检查链接、登录态或权限限制")
+        return ShareParseResult(
+            provider_id="native",
+            source_url=share_url,
+            canonical_url=metadata.page_url,
+            metadata=metadata,
+            variants=variants,
+        )
+
+    def _export_browser_cookies(self) -> Path | None:
+        """Use dedicated Chrome cookies when available, but keep public parsing usable."""
         try:
             return self.browser_session.export_cookies(self.settings.paths.data_dir / "yt-dlp-cookies.txt")
         except Exception:
             return None
+
+    def _export_bilibili_cookies(self) -> Path | None:
+        """Backward-compatible name retained for callers outside the runtime."""
+        return self._export_browser_cookies()
 
     def _store_progress(self, progress: SyncProgress) -> None:
         self.last_progress = progress

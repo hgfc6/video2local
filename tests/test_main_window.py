@@ -87,6 +87,21 @@ def test_main_window_switches_to_bilibili_workbench_and_hides_douyin_resolvers()
     app.quit()
 
 
+def test_main_window_switches_to_youtube_single_link_workbench() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(MainController(engine=FakeEngine()))
+
+    window.handle_platform_switch("youtube")
+
+    assert window.controller.platform_mode == "youtube"
+    assert window.youtube_platform_button.isChecked() is True
+    assert window.sync_group.isHidden() is True
+    assert "YouTube" in window.share_input.placeholderText()
+
+    window.close()
+    app.quit()
+
+
 def test_main_window_keeps_sync_preview_table_scrollable() -> None:
     app = QApplication.instance() or QApplication([])
     window = MainWindow(MainController(engine=FakeEngine()))

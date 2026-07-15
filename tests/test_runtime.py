@@ -1411,6 +1411,68 @@ def test_parse_bilibili_share_text_falls_back_to_anonymous_when_chrome_is_unavai
     assert probe_mock.call_args.kwargs["cookies_file"] is None
 
 
+def test_parse_youtube_share_text_uses_native_formats_and_browser_cookies(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    cookies_path = tmp_path / "yt-dlp-cookies.txt"
+    payload = {
+        "id": "abcDEF12345",
+        "title": "YouTube 测试视频",
+        "uploader": "测试频道",
+        "webpage_url": "https://www.youtube.com/watch?v=abcDEF12345",
+        "formats": [
+            {"format_id": "248", "height": 1080, "vcodec": "vp9", "acodec": "none", "tbr": 4500},
+            {"format_id": "251", "vcodec": "none", "acodec": "opus", "abr": 160},
+        ],
+    }
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+        with patch.object(runtime.downloader, "probe_video_info", return_value=payload) as probe_mock:
+            result = runtime.parse_share_text("分享 https://youtu.be/abcDEF12345")
+
+    assert result.metadata.platform == "youtube"
+    assert result.variants[0].format_selector == "248+251"
+    assert probe_mock.call_args.kwargs["cookies_file"] == cookies_path
+
+
+def test_download_youtube_share_variant_passes_selected_format_and_cookies(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    parse_result = ShareParseResult(
+        provider_id="native",
+        source_url="https://youtu.be/abcDEF12345",
+        canonical_url="https://www.youtube.com/watch?v=abcDEF12345",
+        metadata=VideoMetadata(
+            platform="youtube",
+            source_type=SourceType.SHARE_LINK,
+            video_id="abcDEF12345",
+            title="YouTube 测试视频",
+            author_name="测试频道",
+            page_url="https://www.youtube.com/watch?v=abcDEF12345",
+            download_url="https://www.youtube.com/watch?v=abcDEF12345",
+        ),
+        variants=[
+            VideoVariant(
+                variant_id="youtube:248+251",
+                quality_label="1080p",
+                codec_label="VP9",
+                bit_rate=4500000,
+                file_size=None,
+                width=1920,
+                height=1080,
+                download_url="https://www.youtube.com/watch?v=abcDEF12345",
+                format_selector="248+251",
+            )
+        ],
+    )
+    cookies_path = tmp_path / "yt-dlp-cookies.txt"
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+        with patch.object(runtime.downloader, "download", return_value=("mp4", str(tmp_path / "YouTube 测试视频-abcDEF12345-1080p.mp4"))) as download_mock:
+            runtime.download_share_variant(parse_result, "youtube:248+251")
+
+    assert download_mock.call_args.kwargs["cookies_file"] == cookies_path
+    assert download_mock.call_args.kwargs["format_selector"] == "248+251"
+
+
 def test_preview_bilibili_author_page_uses_login_cookies_and_shows_selected_quality(tmp_path: Path) -> None:
     runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
     cookies_path = tmp_path / "yt-dlp-cookies.txt"

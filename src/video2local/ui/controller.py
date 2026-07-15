@@ -190,7 +190,7 @@ class MainController:
             self.engine.set_resolver_sources(normalized)
 
     def set_platform_mode(self, platform: str) -> None:
-        if platform not in {"douyin", "bilibili"}:
+        if platform not in {"douyin", "bilibili", "youtube"}:
             raise ValueError("不支持的平台工作台")
         if platform == self.platform_mode:
             return
@@ -209,6 +209,8 @@ class MainController:
 
     def _share_platform(self, raw_text: str) -> str | None:
         lowered = raw_text.lower()
+        if "youtube.com" in lowered or "youtu.be" in lowered:
+            return "youtube"
         if "bilibili.com" in lowered or "b23.tv" in lowered:
             return "bilibili"
         if "douyin.com" in lowered or "iesdouyin.com" in lowered:
@@ -216,7 +218,7 @@ class MainController:
         return None
 
     def _platform_name(self) -> str:
-        return "抖音" if self.platform_mode == "douyin" else "Bilibili"
+        return {"douyin": "抖音", "bilibili": "Bilibili", "youtube": "YouTube"}[self.platform_mode]
 
     def wait_for_sync(self, timeout: float | None = None) -> None:
         worker = self._worker
