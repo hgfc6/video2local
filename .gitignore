@@ -4,6 +4,9 @@
 .playwright-cli/
 .video2local/
 downloads/
+build/
+dist/
+*.spec
 
 __pycache__/
 *.py[cod]

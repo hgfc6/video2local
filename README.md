@@ -76,6 +76,22 @@ Bilibili 的分离音视频合并需要安装 `ffmpeg`。程序会检查当前�
 python -m pytest -v
 ```
 
+## Windows EXE
+
+在项目根目录执行：
+
+```powershell
+.\build_exe.ps1
+```
+
+生成的 `dist\Video2Local.exe` 可在 Windows 10/11 直接双击运行，不显示命令行窗口。首次打包会安装 `PyInstaller`；如未安装，可执行：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install PyInstaller
+```
+
+EXE 仍使用系统中的 Chrome、ffmpeg 与网络环境；它会在启动目录创建 `.video2local` 和默认 `downloads` 目录。
+
 ## 边界
 
 - 不接管日常 Chrome，也不自动登录、绕过验证码、广告、会员、地区或版权限制。
