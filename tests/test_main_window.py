@@ -97,6 +97,7 @@ def test_main_window_switches_to_youtube_single_link_workbench() -> None:
     assert window.youtube_platform_button.isChecked() is True
     assert window.sync_group.isHidden() is True
     assert "YouTube" in window.share_input.placeholderText()
+    assert window.youtube_chrome_button.isHidden() is False
 
     window.close()
     app.quit()

@@ -57,6 +57,20 @@ class YtDlpService:
             discovered = shutil.which("ffmpeg", path=refreshed_path)
         return Path(discovered).parent if discovered else None
 
+    def _node_executable(self) -> str | None:
+        discovered = shutil.which("node") or shutil.which("node.exe")
+        if discovered is None:
+            refreshed_path = os.pathsep.join([os.environ.get("PATH", ""), *self._windows_path_entries()])
+            discovered = shutil.which("node", path=refreshed_path)
+        return discovered
+
+    def _javascript_runtime_args(self, url: str) -> list[str]:
+        host = url.lower()
+        if "youtube.com" not in host and "youtu.be" not in host:
+            return []
+        node = self._node_executable()
+        return ["--js-runtimes", f"node:{node}"] if node else []
+
     def command_prefix(self) -> list[str]:
         if self.binary_name is None:
             return [sys.executable, "-m", "yt_dlp"]
@@ -89,6 +103,7 @@ class YtDlpService:
         command = [
             *self.command_prefix(),
             "--ignore-config",
+            *self._javascript_runtime_args(request.url),
             "-f",
             request.format_selector or "bv*+ba/b",
             "--merge-output-format",
@@ -149,6 +164,7 @@ class YtDlpService:
         command = [
             *self.command_prefix(),
             "--ignore-config",
+            *self._javascript_runtime_args(url),
             "--skip-download",
             "--dump-single-json",
         ]
@@ -157,8 +173,31 @@ class YtDlpService:
         elif cookies_from_browser:
             command.extend(["--cookies-from-browser", cookies_from_browser])
         command.append(url)
-        completed = subprocess.run(command, capture_output=True, text=True, check=True)
-        return json.loads(completed.stdout)
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        if completed.returncode != 0:
+            raise RuntimeError(self._probe_error_message(url, completed.stderr, completed.stdout))
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(self._probe_error_message(url, completed.stderr, completed.stdout)) from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(self._probe_error_message(url, completed.stderr, completed.stdout))
+        return payload
+
+    def _probe_error_message(self, url: str, stderr: str, stdout: str) -> str:
+        detail = (stderr or stdout).strip()
+        lowered = detail.lower()
+        if "sign in to confirm you" in lowered or "not a bot" in lowered:
+            return (
+                "YouTube 要求登录确认不是机器人。请点击“启动 Chrome”，在打开的专用 Chrome 登录 YouTube，"
+                "完成验证后保持窗口打开，再重新解析。"
+            )
+        if "no supported javascript runtime" in lowered:
+            return "YouTube 解析缺少 JavaScript 运行时。请安装 Node.js 后重新启动程序。"
+        compact_detail = " ".join(detail.split())
+        if compact_detail:
+            return f"视频信息解析失败: {compact_detail[-500:]}"
+        return f"视频信息解析失败，yt-dlp 未返回可读结果: {url}"
 
     def should_download_direct(self, metadata: VideoMetadata) -> bool:
         download_url = metadata.download_url

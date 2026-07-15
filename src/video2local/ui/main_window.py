@@ -179,6 +179,10 @@ class MainWindow(QMainWindow):
         self.parse_share_button.clicked.connect(self.handle_parse_share)
         self.download_share_button = QPushButton("下载所选版本")
         self.download_share_button.clicked.connect(self.handle_download_share)
+        self.youtube_chrome_button = QPushButton("启动 Chrome 并登录")
+        self.youtube_chrome_button.setObjectName("secondaryButton")
+        self.youtube_chrome_button.clicked.connect(self.handle_launch)
+        self.youtube_chrome_button.setVisible(False)
         self.status_label = QLabel(self.controller.status_text)
         self.source_label = QLabel(self.controller.source_text)
         self.detail_label = QLabel(self.controller.detail_text)
@@ -325,6 +329,7 @@ class MainWindow(QMainWindow):
         share_layout.addWidget(self.share_input)
         share_actions = QHBoxLayout()
         share_actions.setSpacing(8)
+        share_actions.addWidget(self.youtube_chrome_button)
         share_actions.addWidget(self.parse_share_button)
         share_actions.addWidget(self.download_share_button)
         share_layout.addLayout(share_actions)
@@ -389,6 +394,7 @@ class MainWindow(QMainWindow):
         self.resolver_widget.setVisible(is_douyin)
         self.bilibili_resolver_hint.setVisible(is_bilibili or is_youtube)
         self.sync_group.setVisible(not is_youtube)
+        self.youtube_chrome_button.setVisible(is_youtube)
         if is_douyin:
             self.sync_hint.setText("打开抖音收藏页或作者作品页。先检查当前页面，再下载首个样本确认链路。")
             self.share_hint.setText("粘贴抖音分享文案或短链，查看各来源的清晰度后下载所选版本。")
@@ -400,7 +406,7 @@ class MainWindow(QMainWindow):
             self.share_input.setPlaceholderText("粘贴 Bilibili 视频链接、b23 短链或分享文案")
             self.bilibili_resolver_hint.setText("Bilibili 固定使用原生解析和登录 cookies")
         else:
-            self.share_hint.setText("粘贴 YouTube 视频链接或分享文案，解析可用清晰度后下载所选版本。")
+            self.share_hint.setText("先点击“启动 Chrome 并登录”，在专用 Chrome 登录 YouTube；再粘贴视频链接解析可用清晰度。")
             self.share_input.setPlaceholderText("粘贴 YouTube 视频链接、youtu.be 短链或分享文案")
             self.bilibili_resolver_hint.setText("YouTube 固定使用原生解析；登录权限内容可使用专用 Chrome cookies")
 

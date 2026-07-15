@@ -323,3 +323,37 @@ def test_probe_metadata_returns_video_metadata_from_yt_dlp_json() -> None:
     assert metadata.title == "夜景"
     assert metadata.author_name == "小明"
     assert metadata.page_url == "https://www.douyin.com/video/735005"
+
+
+def test_probe_video_info_explains_youtube_bot_verification_instead_of_json_error() -> None:
+    service = YtDlpService(binary_name="yt-dlp")
+    completed = CompletedProcess(
+        args=["yt-dlp"],
+        returncode=1,
+        stdout="null\n",
+        stderr="ERROR: [youtube] abc123: Sign in to confirm you’re not a bot.",
+    )
+
+    with patch("video2local.downloader.subprocess.run", return_value=completed):
+        try:
+            service.probe_video_info(url="https://youtu.be/abc123")
+        except RuntimeError as exc:
+            assert "登录确认不是机器人" in str(exc)
+            assert "启动 Chrome" in str(exc)
+        else:
+            raise AssertionError("Expected a friendly YouTube verification error")
+
+
+def test_build_command_enables_node_runtime_for_youtube(tmp_path: Path) -> None:
+    service = YtDlpService(binary_name="yt-dlp")
+    request = DownloadRequest(
+        url="https://youtu.be/abc123",
+        download_dir=tmp_path,
+        filename_stem="demo-abc123",
+        cookies_from_browser=None,
+    )
+
+    with patch.object(service, "_node_executable", return_value=r"C:\Program Files\nodejs\node.exe"):
+        command = service.build_command(request)
+
+    assert command[command.index("--js-runtimes") + 1] == r"node:C:\Program Files\nodejs\node.exe"
