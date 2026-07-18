@@ -23,10 +23,11 @@ COMMON_CHROME_PATHS = (
     Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
     Path(os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")),
 )
-VIDEO_ID_RE = re.compile(r"/video/(\d+)")
+VIDEO_ID_RE = re.compile(r"/(?:video|note)/(\d+)")
 KUKUTOOL_QUALITY_BUTTON_RE = re.compile(
     r"^下载\s*(?P<quality>.+?)\s*\((?P<size>[\d.]+)\s*(?P<unit>KB|MB|GB)\)$"
 )
+KUKUTOOL_MEDIA_BUTTON_RE = re.compile(r"^下载无水印(?P<media>视频|图片|实况图)$")
 
 
 async def evaluate_with_navigation_retry(page, expression: str, *, attempts: int = 4):
@@ -114,13 +115,13 @@ class ChromeLaunchSpec:
             remote_debugging_port=remote_debugging_port,
         )
 
-    def to_argv(self) -> list[str]:
+    def to_argv(self, start_urls: tuple[str, ...] = ("about:blank",)) -> list[str]:
         return [
             str(self.executable_path),
             f"--user-data-dir={self.user_data_dir}",
             f"--remote-debugging-port={self.remote_debugging_port}",
             "--new-window",
-            "about:blank",
+            *start_urls,
         ]
 
 
@@ -158,6 +159,15 @@ class ChromeRemoteSession:
                 if fallback_page is None:
                     fallback_page = page
         return fallback_page
+
+    @staticmethod
+    def _find_douyin_page(browser):
+        for context in browser.contexts:
+            for page in context.pages:
+                host = urlparse(page.url).netloc.lower()
+                if host in {"douyin.com", "www.douyin.com"}:
+                    return page
+        return None
 
     async def _fetch_active_page_html_async(self) -> str:
         target_url = self.get_active_page_url()
@@ -210,22 +220,33 @@ class ChromeRemoteSession:
         raise RuntimeError("No active browser page found for HTML snapshot capture")
 
     async def _fetch_douyin_aweme_detail_async(self, video_page_url: str) -> dict:
+        match = VIDEO_ID_RE.search(video_page_url)
+        if match is None:
+            raise RuntimeError(f"未能从作品链接提取作品 ID: {video_page_url}")
+        aweme_id = match.group(1)
         async with async_playwright() as playwright:
             browser = await playwright.chromium.connect_over_cdp(f"http://{self.host}:{self.port}")
-            page = None
             try:
-                context = browser.contexts[0] if browser.contexts else await browser.new_context()
-                page = await context.new_page()
-                async with page.expect_response(
-                    lambda response: "/aweme/v1/web/aweme/detail/" in response.url,
-                    timeout=15000,
-                ) as response_info:
-                    await page.goto(video_page_url, wait_until="domcontentloaded")
-                response = await response_info.value
-                return await response.json()
+                page = self._find_douyin_page(browser)
+                if page is None:
+                    raise RuntimeError("请在专用 Chrome 中保持抖音收藏页或博主作品页打开")
+                payload = await page.evaluate(
+                    """async (id) => {
+                        const response = await fetch(
+                            `/aweme/v1/web/aweme/detail/?aweme_id=${encodeURIComponent(id)}`,
+                            { credentials: 'include' },
+                        );
+                        if (!response.ok) {
+                            throw new Error(`detail fetch failed: ${response.status}`);
+                        }
+                        return await response.json();
+                    }""",
+                    aweme_id,
+                )
+                if not isinstance(payload, dict) or not payload.get("aweme_detail"):
+                    raise RuntimeError("抖音未返回作品详情")
+                return payload
             finally:
-                if page is not None:
-                    await page.close()
                 await browser.close()
 
     def fetch_active_page_html_snapshots(
@@ -493,30 +514,32 @@ class KukutoolSession(DouyinPublicSession):
             page_text = str(page_text).strip()
             raise RuntimeError(f"Kukutool 网页解析未完成: {page_text[-300:]}") from exc
 
+        # A mixed post can render its video controls first and image controls a moment later.
+        await page.wait_for_timeout(500)
+
         quality_buttons = page.locator("button")
         button_texts = [" ".join(text.split()) for text in await quality_buttons.all_text_contents()]
-        if not any(self._parse_quality_button_text(text) is not None for text in button_texts):
+        if not any(self._parse_download_button_text(text) is not None for text in button_texts):
             raise RuntimeError("Kukutool 网页解析完成，但未返回可下载的清晰度")
 
         entries: list[dict] = []
         copied_values: list[str] = []
-        seen_qualities: set[str] = set()
+        media_counts: dict[str, int] = {}
         capture_enabled = await self._install_clipboard_capture(page)
         try:
             button_texts = [" ".join(text.split()) for text in await quality_buttons.all_text_contents()]
             for index, button_text in enumerate(button_texts):
-                variant = self._parse_quality_button_text(button_text)
+                variant = self._parse_download_button_text(button_text)
                 if variant is None:
                     continue
-                quality_label = variant["type"]
-                if quality_label in seen_qualities:
-                    continue
-                seen_qualities.add(quality_label)
+                quality_label = self._next_media_label(variant, media_counts)
+                variant = {**variant, "type": quality_label}
+                copy_button_text = "复制" if "size" in variant else "复制无水印链接"
                 copy_button = next(
                     (
                         quality_buttons.nth(next_index)
                         for next_index in range(index + 1, len(button_texts))
-                        if button_texts[next_index] == "复制"
+                        if button_texts[next_index] == copy_button_text
                     ),
                     None,
                 )
@@ -541,6 +564,7 @@ class KukutoolSession(DouyinPublicSession):
                 "Kukutool 网页未提供可复制的视频下载链接: "
                 + ", ".join(repr(value[:120]) for value in copied_values)
             )
+        entries = self._keep_best_video_and_all_images(entries)
         return {
             "url": entries[-1]["url"],
             "videos": [{"url": entries[-1]["url"], "video_fullinfo": entries}],
@@ -556,10 +580,37 @@ class KukutoolSession(DouyinPublicSession):
         multiplier = {"KB": 1024, "MB": 1024 * 1024, "GB": 1024 * 1024 * 1024}[unit]
         return {"type": match.group("quality"), "size": int(size * multiplier)}
 
+    @classmethod
+    def _parse_download_button_text(cls, button_text: str) -> dict | None:
+        quality_variant = cls._parse_quality_button_text(button_text)
+        if quality_variant is not None:
+            return quality_variant
+        match = KUKUTOOL_MEDIA_BUTTON_RE.match(button_text.strip())
+        if match is None:
+            return None
+        return {"type": f"无水印{match.group('media')}"}
+
+    @staticmethod
+    def _next_media_label(variant: dict, media_counts: dict[str, int]) -> str:
+        media_type = str(variant["type"])
+        media_counts[media_type] = media_counts.get(media_type, 0) + 1
+        ordinal = media_counts[media_type]
+        if ordinal == 1:
+            return media_type
+        return f"{media_type} {ordinal}"
+
+    @staticmethod
+    def _keep_best_video_and_all_images(entries: list[dict]) -> list[dict]:
+        images = [entry for entry in entries if "图片" in str(entry.get("type", "")) or "实况图" in str(entry.get("type", ""))]
+        videos = [entry for entry in entries if entry not in images]
+        best_video = max(videos, key=lambda entry: int(entry.get("size") or 0), default=None)
+        return ([best_video] if best_video is not None else []) + images
+
     @staticmethod
     def _quality_result_wait_expression() -> str:
         return """() => [...document.querySelectorAll('button')]
-            .some((button) => /^下载\\s*.+?\\s*\\([\\d.]+\\s*(KB|MB|GB)\\)$/.test(button.innerText.trim()))"""
+            .some((button) => /^下载\\s*.+?\\s*\\([\\d.]+\\s*(KB|MB|GB)\\)$/.test(button.innerText.trim())
+                || /^下载无水印(视频|图片|实况图)$/.test(button.innerText.trim()))"""
 
     @staticmethod
     async def _install_clipboard_capture(page) -> bool:
@@ -636,9 +687,9 @@ class KukutoolSession(DouyinPublicSession):
         async with async_playwright() as playwright:
             browser = await playwright.chromium.connect_over_cdp(f"http://{self.host}:{self.port}")
             try:
-                page = self._find_kukutool_page(browser, base_url)
+                page = await self._find_kukutool_page(browser, base_url)
                 if page is None:
-                    raise RuntimeError("请先在专用 Chrome 中打开 https://dy.kukutool.com，并保持该页面打开")
+                    raise RuntimeError("请先在专用 Chrome 中打开 Kukutool 首页，并保持“粘贴带链接的文本”和“开始解析”控件可见")
                 await self._wait_for_user_to_clear_kukutool_gate(page, base_url=base_url)
                 await page.context.grant_permissions(
                     ["clipboard-read", "clipboard-write"],
@@ -655,12 +706,20 @@ class KukutoolSession(DouyinPublicSession):
         return results
 
     @staticmethod
-    def _find_kukutool_page(browser, base_url: str):
+    async def _find_kukutool_page(browser, base_url: str):
+        """Return the already-open Kukutool page that has its parse form rendered."""
         host = urlparse(base_url).netloc
         for context in browser.contexts:
             for page in context.pages:
-                if urlparse(page.url).netloc == host:
-                    return page
+                if urlparse(page.url).netloc != host:
+                    continue
+                try:
+                    text_box = page.get_by_role("textbox", name="粘贴带链接的文本")
+                    parse_button = page.get_by_role("button", name="开始解析")
+                    if await text_box.count() == 1 and await parse_button.count() == 1:
+                        return page
+                except PlaywrightError:
+                    continue
         return None
 
     @staticmethod

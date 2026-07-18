@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from dataclasses import replace
+from html import unescape
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 
@@ -37,6 +39,7 @@ class AppRuntime:
         self.retry_count: int = 1
         self.flat_output = False
         self._latest_sync_run: dict | None = None
+        self._douyin_card_hints: dict[str, tuple[str, str]] = {}
         self.archive_manager = ArchiveManager(self.settings.paths.downloads_dir)
         self.downloader = YtDlpService()
         self.sync_engine = SyncEngine(
@@ -82,7 +85,14 @@ class AppRuntime:
     def launch_chrome(self) -> None:
         self.ensure_directories()
         launch_spec = ChromeLaunchSpec.detect(self.settings.paths.chrome_profile_dir)
-        subprocess.Popen(launch_spec.to_argv())
+        subprocess.Popen(
+            launch_spec.to_argv(
+                (
+                    "https://www.douyin.com/user/self?from_tab_name=main&showSubTab=video&showTab=favorite_collection",
+                    self.settings.share_resolvers.kukutool_base_url,
+                )
+            )
+        )
 
     def get_current_source(self) -> SourceDescriptor:
         self.ensure_directories()
@@ -308,7 +318,7 @@ class AppRuntime:
             target_dir = (
                 self.output_root
                 / self.archive_manager.safe_name(metadata.platform)
-                / self.archive_manager.safe_name(metadata.author_name)
+                / self.archive_manager.build_author_directory_name(metadata)
             )
         target_dir.mkdir(parents=True, exist_ok=True)
         filename_stem = self.archive_manager.build_filename_stem(
@@ -401,7 +411,7 @@ class AppRuntime:
         cookies_path: Path,
         candidate_urls: list[str],
     ):
-        seen_video_keys: set[tuple[str, str]] = set()
+        seen_media_keys: set[tuple[str, str, str]] = set()
         yielded = 0
         for url in candidate_urls:
             try:
@@ -414,12 +424,38 @@ class AppRuntime:
                 yielded += 1
                 yield self._build_skipped_item(source, url, exc, stage="sync_metadata")
                 continue
-            video_key = (preview_item.metadata.platform, preview_item.metadata.video_id)
-            if video_key in seen_video_keys:
-                continue
-            seen_video_keys.add(video_key)
-            yielded += 1
-            yield preview_item.metadata
+            variants = self._select_sync_variants(preview_item.variants)
+            if not variants:
+                variants = [None]
+            image_ordinal = 0
+            for variant in variants:
+                metadata = preview_item.metadata
+                if variant is not None:
+                    media_key = (metadata.platform, metadata.video_id, variant.download_url)
+                    if media_key in seen_media_keys:
+                        continue
+                    seen_media_keys.add(media_key)
+                    if self._is_image_variant(variant):
+                        image_ordinal += 1
+                        metadata = replace(
+                            metadata,
+                            video_id=f"{metadata.video_id}-{image_ordinal:03d}",
+                            download_url=variant.download_url,
+                            format_selector=variant.format_selector,
+                        )
+                    else:
+                        metadata = replace(
+                            metadata,
+                            download_url=variant.download_url,
+                            format_selector=variant.format_selector,
+                        )
+                else:
+                    media_key = (metadata.platform, metadata.video_id, metadata.download_url)
+                    if media_key in seen_media_keys:
+                        continue
+                    seen_media_keys.add(media_key)
+                yielded += 1
+                yield metadata
         if yielded == 0:
             raise RuntimeError("当前页面未发现可下载视频，请确认已登录，并等待作品或收藏列表加载完成后再试。")
 
@@ -432,6 +468,8 @@ class AppRuntime:
             target_url=source.page_url,
             **snapshot_options,
         ):
+            if source.platform == "douyin":
+                self._douyin_card_hints.update(self._extract_douyin_card_hints(html))
             for url in adapter.collect_candidate_urls(html):
                 if url in seen_urls:
                     continue
@@ -440,6 +478,43 @@ class AppRuntime:
         if self.sync_limit is not None:
             candidate_urls = candidate_urls[: self.sync_limit]
         return candidate_urls
+
+    @staticmethod
+    def _extract_douyin_card_hints(html: str) -> dict[str, tuple[str, str]]:
+        """Read author/caption exposed on visible Douyin video and note cards.
+
+        Kuku deliberately returns no author information for image downloads.  The
+        source card remains a reliable fallback when Douyin detail lookup is
+        unavailable or disabled.
+        """
+        hints: dict[str, tuple[str, str]] = {}
+        pattern = re.compile(
+            r'href=["\'][^"\']*/(?P<kind>video|note)/(?P<id>\d+)[^"\']*["\'][\s\S]{0,2000}?'
+            r'<img[^>]*\balt=["\'](?P<alt>[^"\']+)',
+            re.IGNORECASE,
+        )
+        for match in pattern.finditer(html):
+            alt = unescape(match.group("alt")).strip()
+            separator = "：" if "：" in alt else ":"
+            if separator not in alt:
+                continue
+            author_name, title = (part.strip() for part in alt.split(separator, 1))
+            if not author_name or not title:
+                continue
+            page_url = f"https://www.douyin.com/{match.group('kind')}/{match.group('id')}"
+            hints.setdefault(page_url, (author_name, title))
+        return hints
+
+    def _apply_douyin_card_hint(self, metadata: VideoMetadata, page_url: str) -> VideoMetadata:
+        hint = self._douyin_card_hints.get(page_url)
+        if hint is None:
+            return metadata
+        author_name, title = hint
+        return replace(
+            metadata,
+            author_name=author_name if metadata.author_name == "unknown" else metadata.author_name,
+            title=title if not metadata.title or metadata.title == metadata.video_id else metadata.title,
+        )
 
     def _build_skipped_item(
         self,
@@ -474,11 +549,12 @@ class AppRuntime:
         kukutool_resolution: object | None = None,
     ) -> SyncPreviewItem:
         if source.platform == "douyin":
-            metadata, provider_summary, variant_summary, selected_variant = self._resolve_douyin_sync_metadata(
+            metadata, provider_summary, variant_summary, selected_variant, variants = self._resolve_douyin_sync_metadata(
                 page_url=page_url,
                 source_type=source.source_type,
                 cookies_path=cookies_path,
                 kukutool_resolution=kukutool_resolution,
+                include_variants=True,
             )
             return SyncPreviewItem(
                 metadata=metadata,
@@ -486,6 +562,7 @@ class AppRuntime:
                 variant_summary=variant_summary,
                 selected_quality_label=None if selected_variant is None else selected_variant.quality_label,
                 selected_file_size=None if selected_variant is None else selected_variant.file_size,
+                variants=variants,
             )
         if source.platform == "bilibili":
             payload = self.downloader.probe_video_info(url=page_url, cookies_file=cookies_path)
@@ -526,7 +603,8 @@ class AppRuntime:
         source_type: SourceType,
         cookies_path: Path,
         kukutool_resolution: object | None = None,
-    ) -> tuple[VideoMetadata, str, str, VideoVariant | None]:
+        include_variants: bool = False,
+    ) -> tuple[VideoMetadata, str, str, VideoVariant | None] | tuple[VideoMetadata, str, str, VideoVariant | None, list[VideoVariant]]:
         metadata: VideoMetadata | None = None
         provider_labels: list[str] = []
         merged_variants: list[VideoVariant] = []
@@ -544,8 +622,9 @@ class AppRuntime:
                     source_type=source_type,
                     page_url=resolution.canonical_url,
                 )
+                kukutool_video = (resolution.payload.get("aweme_detail") or {}).get("video") or {}
                 merged_variants.extend(
-                    self._tag_variants(self.adapter.parse_share_variants(resolution.payload), resolution.provider_id)
+                    self._tag_variants(self.adapter._build_kukutool_variants(kukutool_video), resolution.provider_id)
                 )
                 provider_labels.append(resolution.provider_id)
             except Exception as exc:
@@ -561,7 +640,11 @@ class AppRuntime:
                     page_url=page_url,
                 )
                 metadata = native_metadata
-                merged_variants.extend(self._tag_variants(self.adapter.parse_share_variants(detail_payload), "native"))
+                # Kuku supplies the actual downloadable URLs.  Native detail is
+                # still queried on the already open Douyin page for the real
+                # author and caption, so image posts never fall into "unknown".
+                if not merged_variants:
+                    merged_variants.extend(self._tag_variants(self.adapter.parse_share_variants(detail_payload), "native"))
                 if "native" not in provider_labels:
                     provider_labels.append("native")
             except Exception:
@@ -581,11 +664,15 @@ class AppRuntime:
                 ) from resolver_errors[-1]
             raise RuntimeError("已选解析来源未返回可用结果")
 
-        selected_variant = self._select_sync_variant(self._merge_sync_variants(merged_variants))
+        metadata = self._apply_douyin_card_hint(metadata, page_url)
+        merged_variants = self._merge_sync_variants(merged_variants)
+        selected_variant = self._select_sync_variant(merged_variants)
         if selected_variant is not None:
             metadata = replace(metadata, download_url=selected_variant.download_url)
         provider_summary = " + ".join(provider_labels) if provider_labels else "native"
-        variant_summary = self._build_variant_summary(self._merge_sync_variants(merged_variants))
+        variant_summary = self._build_variant_summary(merged_variants)
+        if include_variants:
+            return metadata, provider_summary, variant_summary, selected_variant, merged_variants
         return metadata, provider_summary, variant_summary, selected_variant
 
     def _resolve_provider(
@@ -655,6 +742,17 @@ class AppRuntime:
         if not variants:
             return None
         return variants[0]
+
+    @staticmethod
+    def _is_image_variant(variant: VideoVariant) -> bool:
+        return "图片" in variant.quality_label or "实况图" in variant.quality_label
+
+    def _select_sync_variants(self, variants: list[VideoVariant]) -> list[VideoVariant]:
+        """Download the best video plus every image/Live-photo attachment."""
+        image_variants = [variant for variant in variants if self._is_image_variant(variant)]
+        video_variants = [variant for variant in variants if not self._is_image_variant(variant)]
+        selected_video = self._select_sync_variant(video_variants)
+        return ([selected_video] if selected_video is not None else []) + image_variants
 
     def _merge_sync_variants(self, variants: list[VideoVariant]) -> list[VideoVariant]:
         deduped: dict[str, VideoVariant] = {}

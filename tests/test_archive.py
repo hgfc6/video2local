@@ -35,6 +35,24 @@ def test_build_target_path_sanitizes_path_components(tmp_path: Path) -> None:
     assert manager.build_target_path(metadata, "mp4") == expected
 
 
+def test_build_target_path_uses_douyin_author_name_and_handle(tmp_path: Path) -> None:
+    manager = ArchiveManager(download_root=tmp_path)
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="735001",
+        title="作品文案",
+        author_name="作者A",
+        author_handle="douyin_123",
+        page_url="https://www.douyin.com/video/735001",
+        download_url="https://cdn.example.com/video.mp4",
+    )
+
+    assert manager.build_target_path(metadata, "mp4") == (
+        tmp_path / "douyin" / "作者A+douyin_123" / "作品文案-735001.mp4"
+    )
+
+
 def test_build_target_path_uses_sanitized_video_id_when_title_missing(tmp_path: Path) -> None:
     manager = ArchiveManager(download_root=tmp_path)
     metadata = VideoMetadata(

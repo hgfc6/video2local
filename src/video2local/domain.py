@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
@@ -30,6 +30,7 @@ class VideoMetadata:
     download_url: str
     duration_seconds: int | None = None
     format_selector: str | None = None
+    author_handle: str | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,7 @@ class SyncPreviewItem:
     variant_summary: str
     selected_quality_label: str | None
     selected_file_size: int | None
+    variants: list[VideoVariant] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

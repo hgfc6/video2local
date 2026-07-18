@@ -40,10 +40,87 @@ def test_kukutool_quality_button_parser_extracts_size_and_label() -> None:
     assert variant == {"type": "超高清", "size": int(64.7 * 1024 * 1024)}
 
 
+def test_kukutool_quality_button_parser_accepts_rendered_result_button_text() -> None:
+    variant = KukutoolSession._parse_quality_button_text("下载 540p (1.0MB)")
+
+    assert variant == {"type": "540p", "size": 1024 * 1024}
+
+
+def test_kukutool_download_button_parser_accepts_image_and_live_photo_buttons() -> None:
+    assert KukutoolSession._parse_download_button_text("下载无水印图片") == {"type": "无水印图片"}
+    assert KukutoolSession._parse_download_button_text("下载无水印实况图") == {"type": "无水印实况图"}
+
+
+def test_kukutool_download_button_parser_keeps_video_quality_metadata() -> None:
+    assert KukutoolSession._parse_download_button_text("下载 720p (1.4MB)") == {
+        "type": "720p",
+        "size": int(1.4 * 1024 * 1024),
+    }
+
+
+def test_kukutool_mixed_media_labels_keep_video_and_every_image() -> None:
+    counts: dict[str, int] = {}
+
+    labels = [
+        KukutoolSession._next_media_label({"type": "无水印视频"}, counts),
+        KukutoolSession._next_media_label({"type": "无水印图片"}, counts),
+        KukutoolSession._next_media_label({"type": "无水印图片"}, counts),
+        KukutoolSession._next_media_label({"type": "无水印图片"}, counts),
+    ]
+
+    assert labels == ["无水印视频", "无水印图片", "无水印图片 2", "无水印图片 3"]
+
+
+def test_kukutool_keeps_only_largest_video_but_all_image_entries() -> None:
+    entries = KukutoolSession._keep_best_video_and_all_images(
+        [
+            {"type": "540p", "size": 1, "url": "https://cdn.example.com/540.mp4"},
+            {"type": "1080p", "size": 3, "url": "https://cdn.example.com/1080.mp4"},
+            {"type": "无水印图片", "url": "https://cdn.example.com/1.jpg"},
+            {"type": "无水印图片 2", "url": "https://cdn.example.com/2.jpg"},
+        ]
+    )
+
+    assert [entry["url"] for entry in entries] == [
+        "https://cdn.example.com/1080.mp4",
+        "https://cdn.example.com/1.jpg",
+        "https://cdn.example.com/2.jpg",
+    ]
+
+
+def test_find_kukutool_page_requires_the_visible_parse_form() -> None:
+    class FakeLocator:
+        def __init__(self, count: int) -> None:
+            self._count = count
+
+        async def count(self) -> int:
+            return self._count
+
+    class FakePage:
+        def __init__(self, url: str, textboxes: int, parse_buttons: int) -> None:
+            self.url = url
+            self._textboxes = textboxes
+            self._parse_buttons = parse_buttons
+
+        def get_by_role(self, role: str, name: str):
+            if role == "textbox":
+                return FakeLocator(self._textboxes)
+            return FakeLocator(self._parse_buttons)
+
+    form_page = FakePage("https://dy.kukutool.com/", 1, 1)
+    empty_page = FakePage("https://dy.kukutool.com/other", 0, 0)
+    browser = type("FakeBrowser", (), {"contexts": [type("FakeContext", (), {"pages": [empty_page, form_page]})()]})()
+
+    selected = asyncio.run(KukutoolSession._find_kukutool_page(browser, "https://dy.kukutool.com/"))
+
+    assert selected is form_page
+
+
 def test_kukutool_result_wait_expression_matches_downloadable_quality_buttons() -> None:
     expression = KukutoolSession._quality_result_wait_expression()
 
     assert "下载" in expression
+    assert "下载无水印" in expression
     assert "KB|MB|GB" in expression
 
 

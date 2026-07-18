@@ -52,11 +52,18 @@ class ArchiveManager:
         normalized = self.safe_name(raw.strip().lstrip(".")).replace(" ", ".").lower()
         return normalized or "bin"
 
+    def build_author_directory_name(self, metadata: VideoMetadata) -> str:
+        """Use a stable Douyin handle alongside the display name when available."""
+        author = self.safe_name(metadata.author_name)
+        if metadata.platform == "douyin" and metadata.author_handle:
+            return f"{author}+{self.safe_name(metadata.author_handle)}"
+        return author
+
     def build_target_path(self, metadata: VideoMetadata, file_ext: str) -> Path:
         extension = self.normalize_extension(file_ext)
         filename = f"{self.build_filename_stem(video_id=metadata.video_id, title=metadata.title)}.{extension}"
         if self.flatten_into_root:
             return self.download_root / filename
         platform = self.safe_name(metadata.platform)
-        author = self.safe_name(metadata.author_name)
+        author = self.build_author_directory_name(metadata)
         return self.download_root / platform / author / filename

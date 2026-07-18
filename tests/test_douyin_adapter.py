@@ -91,11 +91,12 @@ def test_parse_aweme_detail_uses_highest_bitrate_media_url() -> None:
     assert metadata.download_url == "https://cdn.example.com/high.mp4"
 
 
-def test_collect_candidate_urls_returns_unique_absolute_video_urls() -> None:
+def test_collect_candidate_urls_returns_unique_absolute_video_and_note_urls() -> None:
     adapter = DouyinAdapter()
     html = """
     <a href="/video/735001">one</a>
     <a href="https://www.douyin.com/video/735002">two</a>
+    <a href="/note/735003">image post</a>
     <a href="/video/735001">duplicate</a>
     """
 
@@ -104,6 +105,7 @@ def test_collect_candidate_urls_returns_unique_absolute_video_urls() -> None:
     assert urls == [
         "https://www.douyin.com/video/735001",
         "https://www.douyin.com/video/735002",
+        "https://www.douyin.com/note/735003",
     ]
 
 

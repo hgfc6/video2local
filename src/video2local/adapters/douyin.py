@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 from video2local.adapters.base import SourceDescriptor
 from video2local.domain import SourceType, VideoMetadata, VideoVariant
 
-VIDEO_URL_RE = re.compile(r'https://www\.douyin\.com/video/\d+|/video/\d+')
+MEDIA_URL_RE = re.compile(r'https://www\.douyin\.com/(?:video|note)/\d+|/(?:video|note)/\d+')
 SHARE_URL_RE = re.compile(r"https?://[^\s]+")
 
 
@@ -33,7 +33,7 @@ class DouyinAdapter:
     def collect_candidate_urls(self, html: str) -> list[str]:
         seen: set[str] = set()
         urls: list[str] = []
-        for match in VIDEO_URL_RE.findall(html):
+        for match in MEDIA_URL_RE.findall(html):
             url = match if match.startswith("http") else f"https://www.douyin.com{match}"
             if url in seen:
                 continue
@@ -81,6 +81,7 @@ class DouyinAdapter:
             or author.get("short_id")
             or "unknown"
         )
+        author_handle = author.get("unique_id") or author.get("short_id") or None
         duration_ms = detail.get("duration")
         duration_seconds = None
         if isinstance(duration_ms, int):
@@ -94,6 +95,7 @@ class DouyinAdapter:
             page_url=page_url,
             download_url=self._select_best_media_url(video),
             duration_seconds=duration_seconds,
+            author_handle=str(author_handle) if author_handle else None,
         )
 
     def parse_share_variants(self, payload: dict) -> list[VideoVariant]:

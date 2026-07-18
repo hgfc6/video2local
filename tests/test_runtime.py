@@ -41,7 +41,84 @@ def test_launch_chrome_creates_directories_and_starts_process(tmp_path: Path) ->
     assert settings.paths.chrome_profile_dir.exists()
     assert settings.paths.downloads_dir.exists() is False
     detect_mock.assert_called_once_with(settings.paths.chrome_profile_dir)
-    popen_mock.assert_called_once_with(launch_spec.to_argv())
+    popen_mock.assert_called_once_with(
+        launch_spec.to_argv(
+            (
+                "https://www.douyin.com/user/self?from_tab_name=main&showSubTab=video&showTab=favorite_collection",
+                settings.share_resolvers.kukutool_base_url,
+            )
+        )
+    )
+
+
+def test_sync_variant_selection_keeps_best_video_and_all_images(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    variants = [
+        VideoVariant("540", "540p", "unknown", None, 1, None, None, "https://cdn.example.com/540.mp4"),
+        VideoVariant("1080", "1080p", "unknown", None, 3, None, None, "https://cdn.example.com/1080.mp4"),
+        VideoVariant("image-1", "无水印图片", "unknown", None, None, None, None, "https://cdn.example.com/1.jpg"),
+        VideoVariant("image-2", "无水印图片 2", "unknown", None, None, None, None, "https://cdn.example.com/2.jpg"),
+    ]
+
+    selected = runtime._select_sync_variants(variants)
+
+    assert [item.download_url for item in selected] == [
+        "https://cdn.example.com/540.mp4",
+        "https://cdn.example.com/1.jpg",
+        "https://cdn.example.com/2.jpg",
+    ]
+
+
+def test_sync_image_metadata_uses_zero_padded_file_suffix(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="735001",
+        title="图文作品",
+        author_name="作者A",
+        page_url="https://www.douyin.com/note/735001",
+        download_url="https://cdn.example.com/video.mp4",
+    )
+    image_variants = [
+        VideoVariant("image-1", "无水印图片", "unknown", None, None, None, None, "https://cdn.example.com/1.jpg"),
+        VideoVariant("image-2", "无水印图片 2", "unknown", None, None, None, None, "https://cdn.example.com/2.jpg"),
+    ]
+    preview_item = type("Preview", (), {"metadata": metadata, "variants": image_variants})()
+
+    runtime._build_preview_item = lambda **_: preview_item  # type: ignore[method-assign]
+    items = list(
+        runtime._iter_sync_items(
+            source=type("Source", (), {"platform": "douyin", "source_type": SourceType.FAVORITES})(),
+            cookies_path=tmp_path / "cookies.txt",
+            candidate_urls=[metadata.page_url],
+        )
+    )
+
+    assert [item.video_id for item in items] == ["735001-001", "735001-002"]
+    assert [item.title for item in items] == ["图文作品", "图文作品"]
+
+
+def test_douyin_card_hint_fills_unknown_kukutool_image_author(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    page_url = "https://www.douyin.com/note/7662725384303208805"
+    runtime._douyin_card_hints = runtime._extract_douyin_card_hints(
+        '<a href="/note/7662725384303208805"><img alt="图文作者：图文作品文案"></a>'
+    )
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="7662725384303208805",
+        title="7662725384303208805",
+        author_name="unknown",
+        page_url=page_url,
+        download_url="https://cdn.example.com/1.jpg",
+    )
+
+    enriched = runtime._apply_douyin_card_hint(metadata, page_url)
+
+    assert enriched.author_name == "图文作者"
+    assert enriched.title == "图文作品文案"
 
 
 def test_runtime_configures_native_share_resolver_only_by_default(tmp_path: Path) -> None:
@@ -432,6 +509,8 @@ def test_start_sync_uses_kukutool_share_resolver_sequentially_when_enabled(tmp_p
     assert detail_mock.call_count == 2
     probe_mock.assert_not_called()
     assert [item.video_id for item in captured_items] == ["735001", "735002"]
+    assert [item.author_name for item in captured_items] == ["author-735001", "author-735002"]
+    assert [item.title for item in captured_items] == ["title-735001", "title-735002"]
     assert captured_items[0].download_url == "https://cdn.example.com/735001-ultra.mp4"
     assert captured_items[1].download_url == "https://cdn.example.com/735002-ultra.mp4"
 
@@ -611,7 +690,7 @@ def test_preview_sync_returns_merged_variant_summary(tmp_path: Path) -> None:
     assert len(preview.items) == 2
     assert preview.items[0].provider_summary == "kukutool + native"
     assert "超高清" in preview.items[0].variant_summary
-    assert "2160p" in preview.items[0].variant_summary
+    assert "2160p" not in preview.items[0].variant_summary
     assert preview.items[0].selected_quality_label == "超高清"
     assert preview.items[0].selected_file_size == 67819321
     assert preview.items[0].metadata.author_name == "author-735001"
