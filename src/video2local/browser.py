@@ -37,8 +37,9 @@ KUKUTOOL_CLEAR_BUTTON_RE = re.compile(r"^(清除内容|Clear)$", re.IGNORECASE)
 KUKUTOOL_MORE_SIZES_BUTTON_RE = re.compile(r"^(更多大小|More sizes)$", re.IGNORECASE)
 KUKUTOOL_COPY_LINK_BUTTON_RE = re.compile(r"^(复制链接|Copy link)$", re.IGNORECASE)
 KUKUTOOL_NOTICE_DISMISS_BUTTON_RE = re.compile(
-    r"^(7天内不再提示|Don't show again for 7 days)$", re.IGNORECASE
+    r"7天内不[在再]提示|Don't show again for 7 days", re.IGNORECASE
 )
+KUKUTOOL_NOTICE_CONTINUE_BUTTON_RE = re.compile(r"^(继续处理|Continue)$", re.IGNORECASE)
 
 
 async def evaluate_with_navigation_retry(page, expression: str, *, attempts: int = 4):
@@ -514,7 +515,7 @@ class KukutoolSession(DouyinPublicSession):
         clear_button = page.get_by_role("button", name=KUKUTOOL_CLEAR_BUTTON_RE)
         if await clear_button.count():
             await clear_button.click()
-            await self._wait_for_previous_results_to_clear(page)
+            await self._wait_for_previous_results_to_clear(page, base_url=base_url)
         text_box = await self._wait_for_kukutool_input(page)
         await text_box.fill(share_url)
         await page.get_by_role("button", name=KUKUTOOL_PARSE_BUTTON_RE).click()
@@ -541,31 +542,39 @@ class KukutoolSession(DouyinPublicSession):
         capture_enabled = await self._install_clipboard_capture(page)
         try:
             button_texts = [" ".join(text.split()) for text in await quality_buttons.all_text_contents()]
-            for index, button_text in enumerate(button_texts):
-                variant = self._parse_download_button_text(button_text)
-                if variant is None:
-                    continue
-                quality_label = self._next_media_label(variant, media_counts)
-                variant = {**variant, "type": quality_label}
-                copy_button_text = "复制" if "size" in variant else "复制无水印链接"
-                copy_button = next(
-                    (
-                        quality_buttons.nth(next_index)
-                        for next_index in range(index + 1, len(button_texts))
-                        if button_texts[next_index] == copy_button_text
-                    ),
-                    None,
-                )
-                if copy_button is None:
-                    continue
-                download_url = await self._copy_download_url(page, copy_button, capture_enabled)
-                copied_values.append(str(download_url))
-                if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
-                    continue
-                entries.append({**variant, "url": download_url})
             more_sizes_entry = await self._read_more_sizes_entry(page, capture_enabled)
             if more_sizes_entry is not None:
+                # More sizes is the terminal result for video posts. Its modal
+                # covers the page's unrelated image controls, so do not inspect
+                # any lower-priority buttons after its URL was captured.
                 entries.append(more_sizes_entry)
+            else:
+                fallback_video_index = self._select_standard_video_button(button_texts)
+                for index, button_text in enumerate(button_texts):
+                    variant = self._parse_download_button_text(button_text)
+                    if variant is None:
+                        continue
+                    if not self._is_image_or_live_photo(variant):
+                        if fallback_video_index is None or index != fallback_video_index:
+                            continue
+                    quality_label = self._next_media_label(variant, media_counts)
+                    variant = {**variant, "type": quality_label}
+                    copy_button_text = "复制" if "size" in variant else "复制无水印链接"
+                    copy_button = next(
+                        (
+                            quality_buttons.nth(next_index)
+                            for next_index in range(index + 1, len(button_texts))
+                            if button_texts[next_index] == copy_button_text
+                        ),
+                        None,
+                    )
+                    if copy_button is None:
+                        continue
+                    download_url = await self._copy_download_url(page, copy_button, capture_enabled)
+                    copied_values.append(str(download_url))
+                    if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
+                        continue
+                    entries.append({**variant, "url": download_url})
         finally:
             if capture_enabled:
                 await self._restore_clipboard_capture(page)
@@ -586,18 +595,32 @@ class KukutoolSession(DouyinPublicSession):
 
     async def _read_more_sizes_entry(self, page, capture_enabled: bool) -> dict | None:
         """Copy the optional large-file URL without triggering browser download."""
-        more_sizes = page.get_by_role("button", name=KUKUTOOL_MORE_SIZES_BUTTON_RE)
-        if not await more_sizes.count():
+        if not await self._click_more_sizes_button(page):
             return None
-        await more_sizes.first.click()
         dialog_text = await self._wait_for_more_sizes_dialog_or_notice(page)
         if self._is_usage_notice(dialog_text):
-            dismiss = page.get_by_role("button", name=KUKUTOOL_NOTICE_DISMISS_BUTTON_RE)
-            if await dismiss.count():
-                await dismiss.first.click()
-                await page.wait_for_timeout(200)
-                await more_sizes.first.click()
-            dialog_text = await self._wait_for_more_sizes_dialog_or_notice(page)
+            if not await self._dismiss_usage_notice(page):
+                return None
+            await self._wait_for_usage_notice_to_clear(page)
+            # The preference click starts the large-file request. The More sizes
+            # button changes to "获取中…" for several seconds before the dialog appears.
+            dialog_text = await self._wait_for_more_sizes_dialog_or_notice(page, timeout_seconds=45)
+            if not self._is_more_sizes_dialog(dialog_text):
+                if not await self._click_more_sizes_button(page):
+                    return None
+                dialog_text = await self._wait_for_more_sizes_dialog_or_notice(page, timeout_seconds=45)
+            if self._is_usage_notice(dialog_text):
+                # The preference button can be delayed by a site animation. Continue is
+                # only a fallback after the left-hand preference control was attempted.
+                continue_button = page.get_by_role("button", name=KUKUTOOL_NOTICE_CONTINUE_BUTTON_RE)
+                if await continue_button.count():
+                    await continue_button.first.click()
+                    await self._wait_for_usage_notice_to_clear(page)
+                    dialog_text = await self._wait_for_more_sizes_dialog_or_notice(page, timeout_seconds=45)
+                    if not self._is_more_sizes_dialog(dialog_text):
+                        if not await self._click_more_sizes_button(page):
+                            return None
+                        dialog_text = await self._wait_for_more_sizes_dialog_or_notice(page, timeout_seconds=45)
         if not self._is_more_sizes_dialog(dialog_text):
             return None
         size = self._parse_file_size(dialog_text)
@@ -611,6 +634,34 @@ class KukutoolSession(DouyinPublicSession):
         if size is not None:
             entry["size"] = size
         return entry
+
+    @staticmethod
+    async def _click_more_sizes_button(page) -> bool:
+        more_sizes = page.get_by_role("button", name=KUKUTOOL_MORE_SIZES_BUTTON_RE)
+        if not await more_sizes.count():
+            more_sizes = page.locator("button").filter(has_text=KUKUTOOL_MORE_SIZES_BUTTON_RE)
+        if not await more_sizes.count():
+            return False
+        await more_sizes.first.click(timeout=5000)
+        return True
+
+    @staticmethod
+    async def _dismiss_usage_notice(page) -> bool:
+        dismiss = page.get_by_role("button", name=KUKUTOOL_NOTICE_DISMISS_BUTTON_RE)
+        if not await dismiss.count():
+            dismiss = page.locator("button").filter(has_text=KUKUTOOL_NOTICE_DISMISS_BUTTON_RE)
+        if not await dismiss.count():
+            return False
+        await dismiss.first.click(timeout=5000)
+        return True
+
+    async def _wait_for_usage_notice_to_clear(self, page, *, timeout_seconds: int = 10) -> None:
+        for _ in range(timeout_seconds * 10):
+            page_text = str(await evaluate_with_navigation_retry(page, "document.body.innerText"))
+            if not self._is_usage_notice(page_text):
+                return
+            await page.wait_for_timeout(100)
+        raise RuntimeError("Kukutool 使用提示未关闭，请手动关闭后重试")
 
     async def _copy_download_url(self, page, copy_button, capture_enabled: bool) -> str:
         capture_index = await self._clipboard_capture_length(page) if capture_enabled else 0
@@ -670,6 +721,21 @@ class KukutoolSession(DouyinPublicSession):
     def _is_image_or_live_photo(entry: dict) -> bool:
         media_type = str(entry.get("type", ""))
         return "图片" in media_type or "实况图" in media_type
+
+    @classmethod
+    def _select_standard_video_button(cls, button_texts: list[str]) -> int | None:
+        """Use 1080p then 720p only when More sizes did not return a link."""
+        parsed = [cls._parse_download_button_text(text) for text in button_texts]
+        for quality in ("1080p", "720p"):
+            for index, variant in enumerate(parsed):
+                if variant is not None and str(variant["type"]).lower() == quality:
+                    return index
+        candidates = [
+            (index, variant)
+            for index, variant in enumerate(parsed)
+            if variant is not None and not cls._is_image_or_live_photo(variant)
+        ]
+        return max(candidates, key=lambda item: int(item[1].get("size") or 0), default=(None, None))[0]
 
     @staticmethod
     def _quality_result_wait_expression() -> str:
@@ -772,12 +838,16 @@ class KukutoolSession(DouyinPublicSession):
 
     @staticmethod
     async def _find_kukutool_page(browser, base_url: str):
-        """Return the already-open Kukutool page that has its parse form rendered."""
+        """Return the existing Kukutool page, including a transient ad insert."""
         host = urlparse(base_url).netloc
         for context in browser.contexts:
             for page in context.pages:
                 if urlparse(page.url).netloc != host:
                     continue
+                # Google vignette keeps Kukutool's host but removes its document.
+                # Return this page so the normal gate handler can navigate back.
+                if KukutoolSession._is_google_vignette(page.url):
+                    return page
                 try:
                     parse_button = page.get_by_role("button", name=KUKUTOOL_PARSE_BUTTON_RE)
                     if await parse_button.count():
@@ -801,8 +871,16 @@ class KukutoolSession(DouyinPublicSession):
     def _is_kukutool_page(page_url: str, base_url: str) -> bool:
         return urlparse(page_url).netloc == urlparse(base_url).netloc
 
+    @staticmethod
+    def _is_google_vignette(page_url: str) -> bool:
+        return urlparse(page_url).fragment.lower() == "google_vignette"
+
     async def _wait_for_kukutool_page(self, page, *, base_url: str, timeout_seconds: int = 600) -> None:
         for _ in range(timeout_seconds):
+            if self._is_google_vignette(page.url):
+                await self._dismiss_kukutool_ad_popup(page)
+                await page.wait_for_timeout(300)
+                continue
             if self._is_kukutool_page(page.url, base_url):
                 return
             await page.wait_for_timeout(1000)
@@ -823,9 +901,16 @@ class KukutoolSession(DouyinPublicSession):
                 continue
         raise PlaywrightTimeoutError("Kukutool quality results did not appear before timeout")
 
-    async def _wait_for_previous_results_to_clear(self, page, *, timeout_seconds: int = 10) -> None:
+    async def _wait_for_previous_results_to_clear(
+        self,
+        page,
+        *,
+        base_url: str,
+        timeout_seconds: int = 10,
+    ) -> None:
         """Avoid treating the prior work's download buttons as the next result."""
         for _ in range(timeout_seconds * 10):
+            await self._wait_for_kukutool_page(page, base_url=base_url)
             has_results = await evaluate_with_navigation_retry(
                 page,
                 self._quality_result_wait_expression(),
@@ -872,6 +957,12 @@ class KukutoolSession(DouyinPublicSession):
 
     async def _dismiss_kukutool_ad_popup(self, page) -> bool:
         """Dismiss only generic first-page advertisements, never verification or size dialogs."""
+        if self._is_google_vignette(page.url):
+            try:
+                await page.go_back(wait_until="domcontentloaded", timeout=5000)
+                return True
+            except PlaywrightError:
+                return False
         page_text = str(await evaluate_with_navigation_retry(page, "document.body.innerText"))
         if (
             self._is_usage_notice(page_text)

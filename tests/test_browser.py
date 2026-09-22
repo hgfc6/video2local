@@ -9,6 +9,7 @@ from video2local.browser import (
     ChromeLaunchSpec,
     ChromeRemoteSession,
     DouyinSignedSession,
+    KUKUTOOL_NOTICE_DISMISS_BUTTON_RE,
     KukutoolSession,
     evaluate_with_navigation_retry,
     wait_for_function_with_navigation_retry,
@@ -96,8 +97,18 @@ def test_kukutool_more_sizes_file_size_parser_supports_chinese_and_english() -> 
 def test_kukutool_more_sizes_dialog_and_usage_notice_detection_are_bilingual() -> None:
     assert KukutoolSession._is_usage_notice("Usage notice\nDon't show again for 7 days")
     assert KukutoolSession._is_usage_notice("使用提示\n7天内不再提示")
+    assert KUKUTOOL_NOTICE_DISMISS_BUTTON_RE.search("7天内不在提示")
     assert KukutoolSession._is_more_sizes_dialog("More sizes\nFile size: 156.05 MB")
     assert KukutoolSession._is_more_sizes_dialog("更多大小\n文件大小：156.05 MB")
+
+
+def test_kukutool_standard_video_fallback_prefers_1080p_then_720p() -> None:
+    assert KukutoolSession._select_standard_video_button(
+        ["下载 540p (1.0MB)", "下载 720p (2.0MB)", "下载 1080p (3.0MB)"]
+    ) == 2
+    assert KukutoolSession._select_standard_video_button(
+        ["下载 540p (1.0MB)", "下载 720p (2.0MB)"]
+    ) == 1
 
 
 def test_find_kukutool_page_requires_the_visible_parse_button() -> None:
@@ -141,6 +152,12 @@ def test_kukutool_more_sizes_controls_support_chinese_and_english_labels() -> No
     assert KukutoolSession._is_more_sizes_dialog("More sizes\nFile size: 1 GB")
 
 
+def test_kukutool_usage_notice_dismissal_waits_for_the_modal_to_close() -> None:
+    source = KukutoolSession._wait_for_usage_notice_to_clear.__code__.co_consts
+
+    assert any("使用提示未关闭" in value for value in source if isinstance(value, str))
+
+
 def test_kukutool_waits_for_previous_result_controls_to_clear() -> None:
     source = KukutoolSession._wait_for_previous_results_to_clear.__code__.co_consts
 
@@ -158,6 +175,13 @@ def test_kukutool_page_check_rejects_ad_navigation() -> None:
 
     assert KukutoolSession._is_kukutool_page(base_url, base_url) is True
     assert KukutoolSession._is_kukutool_page("https://googleads.g.doubleclick.net/pagead/ad", base_url) is False
+    assert KukutoolSession._is_google_vignette("https://dy.kukutool.com/#google_vignette") is True
+
+
+def test_kukutool_page_lookup_keeps_same_origin_vignette_for_gate_handling() -> None:
+    names = KukutoolSession._find_kukutool_page.__code__.co_names
+
+    assert "_is_google_vignette" in names
 
 
 def test_page_evaluate_retries_when_navigation_replaces_execution_context() -> None:
