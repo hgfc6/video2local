@@ -27,6 +27,18 @@ VIDEO_ID_RE = re.compile(r"/(?:video|note)/(\d+)")
 KUKUTOOL_QUALITY_BUTTON_RE = re.compile(
     r"^下载\s*(?P<quality>.+?)\s*\((?P<size>[\d.]+)\s*(?P<unit>KB|MB|GB)\)$"
 )
+KUKUTOOL_MEDIA_BUTTON_RE = re.compile(r"^下载无水印(?P<media>视频|图片|实况图)$")
+KUKUTOOL_FILE_SIZE_RE = re.compile(
+    r"(?:文件大小|File size)\s*[:：]\s*(?P<size>[\d.]+)\s*(?P<unit>KB|MB|GB)",
+    re.IGNORECASE,
+)
+KUKUTOOL_PARSE_BUTTON_RE = re.compile(r"^(开始解析|Parse Video)$", re.IGNORECASE)
+KUKUTOOL_CLEAR_BUTTON_RE = re.compile(r"^(清除内容|Clear)$", re.IGNORECASE)
+KUKUTOOL_MORE_SIZES_BUTTON_RE = re.compile(r"^(更多大小|More sizes)$", re.IGNORECASE)
+KUKUTOOL_COPY_LINK_BUTTON_RE = re.compile(r"^(复制链接|Copy link)$", re.IGNORECASE)
+KUKUTOOL_NOTICE_DISMISS_BUTTON_RE = re.compile(
+    r"^(7天内不再提示|Don't show again for 7 days)$", re.IGNORECASE
+)
 
 
 async def evaluate_with_navigation_retry(page, expression: str, *, attempts: int = 4):
@@ -114,13 +126,13 @@ class ChromeLaunchSpec:
             remote_debugging_port=remote_debugging_port,
         )
 
-    def to_argv(self) -> list[str]:
+    def to_argv(self, start_urls: tuple[str, ...] = ("about:blank",)) -> list[str]:
         return [
             str(self.executable_path),
             f"--user-data-dir={self.user_data_dir}",
             f"--remote-debugging-port={self.remote_debugging_port}",
             "--new-window",
-            "about:blank",
+            *start_urls,
         ]
 
 
@@ -158,6 +170,15 @@ class ChromeRemoteSession:
                 if fallback_page is None:
                     fallback_page = page
         return fallback_page
+
+    @staticmethod
+    def _find_douyin_page(browser):
+        for context in browser.contexts:
+            for page in context.pages:
+                host = urlparse(page.url).netloc.lower()
+                if host in {"douyin.com", "www.douyin.com"}:
+                    return page
+        return None
 
     async def _fetch_active_page_html_async(self) -> str:
         target_url = self.get_active_page_url()
@@ -210,22 +231,33 @@ class ChromeRemoteSession:
         raise RuntimeError("No active browser page found for HTML snapshot capture")
 
     async def _fetch_douyin_aweme_detail_async(self, video_page_url: str) -> dict:
+        match = VIDEO_ID_RE.search(video_page_url)
+        if match is None:
+            raise RuntimeError(f"未能从作品链接提取作品 ID: {video_page_url}")
+        aweme_id = match.group(1)
         async with async_playwright() as playwright:
             browser = await playwright.chromium.connect_over_cdp(f"http://{self.host}:{self.port}")
-            page = None
             try:
-                context = browser.contexts[0] if browser.contexts else await browser.new_context()
-                page = await context.new_page()
-                async with page.expect_response(
-                    lambda response: "/aweme/v1/web/aweme/detail/" in response.url,
-                    timeout=15000,
-                ) as response_info:
-                    await page.goto(video_page_url, wait_until="domcontentloaded")
-                response = await response_info.value
-                return await response.json()
+                page = self._find_douyin_page(browser)
+                if page is None:
+                    raise RuntimeError("请在专用 Chrome 中保持抖音收藏页或博主作品页打开")
+                payload = await page.evaluate(
+                    """async (id) => {
+                        const response = await fetch(
+                            `/aweme/v1/web/aweme/detail/?aweme_id=${encodeURIComponent(id)}`,
+                            { credentials: 'include' },
+                        );
+                        if (!response.ok) {
+                            throw new Error(`detail fetch failed: ${response.status}`);
+                        }
+                        return await response.json();
+                    }""",
+                    aweme_id,
+                )
+                if not isinstance(payload, dict) or not payload.get("aweme_detail"):
+                    raise RuntimeError("抖音未返回作品详情")
+                return payload
             finally:
-                if page is not None:
-                    await page.close()
                 await browser.close()
 
     def fetch_active_page_html_snapshots(
@@ -477,13 +509,15 @@ class KukutoolSession(DouyinPublicSession):
     port: int = 9222
 
     async def _parse_loaded_page_async(self, page, share_url: str, *, base_url: str) -> dict:
+        await self._dismiss_kukutool_ad_popup(page)
         await self._wait_for_user_to_clear_kukutool_gate(page, base_url=base_url)
-        clear_button = page.get_by_role("button", name="清除内容")
+        clear_button = page.get_by_role("button", name=KUKUTOOL_CLEAR_BUTTON_RE)
         if await clear_button.count():
             await clear_button.click()
-        text_box = page.get_by_role("textbox", name="粘贴带链接的文本")
+            await self._wait_for_previous_results_to_clear(page)
+        text_box = await self._wait_for_kukutool_input(page)
         await text_box.fill(share_url)
-        await page.get_by_role("button", name="开始解析").click()
+        await page.get_by_role("button", name=KUKUTOOL_PARSE_BUTTON_RE).click()
         await page.wait_for_timeout(300)
         await self._wait_for_user_to_clear_kukutool_gate(page, base_url=base_url)
         try:
@@ -493,46 +527,45 @@ class KukutoolSession(DouyinPublicSession):
             page_text = str(page_text).strip()
             raise RuntimeError(f"Kukutool 网页解析未完成: {page_text[-300:]}") from exc
 
+        # A mixed post can render its video controls first and image controls a moment later.
+        await page.wait_for_timeout(500)
+
         quality_buttons = page.locator("button")
         button_texts = [" ".join(text.split()) for text in await quality_buttons.all_text_contents()]
-        if not any(self._parse_quality_button_text(text) is not None for text in button_texts):
+        if not any(self._parse_download_button_text(text) is not None for text in button_texts):
             raise RuntimeError("Kukutool 网页解析完成，但未返回可下载的清晰度")
 
         entries: list[dict] = []
         copied_values: list[str] = []
-        seen_qualities: set[str] = set()
+        media_counts: dict[str, int] = {}
         capture_enabled = await self._install_clipboard_capture(page)
         try:
             button_texts = [" ".join(text.split()) for text in await quality_buttons.all_text_contents()]
             for index, button_text in enumerate(button_texts):
-                variant = self._parse_quality_button_text(button_text)
+                variant = self._parse_download_button_text(button_text)
                 if variant is None:
                     continue
-                quality_label = variant["type"]
-                if quality_label in seen_qualities:
-                    continue
-                seen_qualities.add(quality_label)
+                quality_label = self._next_media_label(variant, media_counts)
+                variant = {**variant, "type": quality_label}
+                copy_button_text = "复制" if "size" in variant else "复制无水印链接"
                 copy_button = next(
                     (
                         quality_buttons.nth(next_index)
                         for next_index in range(index + 1, len(button_texts))
-                        if button_texts[next_index] == "复制"
+                        if button_texts[next_index] == copy_button_text
                     ),
                     None,
                 )
                 if copy_button is None:
                     continue
-                capture_index = await self._clipboard_capture_length(page) if capture_enabled else 0
-                await copy_button.click()
-                download_url = await self._wait_for_captured_url(page, capture_index) if capture_enabled else ""
-                if not download_url:
-                    download_url = await evaluate_with_navigation_retry(page, "navigator.clipboard.readText()")
-                if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
-                    download_url = self._read_windows_clipboard()
+                download_url = await self._copy_download_url(page, copy_button, capture_enabled)
                 copied_values.append(str(download_url))
                 if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
                     continue
                 entries.append({**variant, "url": download_url})
+            more_sizes_entry = await self._read_more_sizes_entry(page, capture_enabled)
+            if more_sizes_entry is not None:
+                entries.append(more_sizes_entry)
         finally:
             if capture_enabled:
                 await self._restore_clipboard_capture(page)
@@ -541,10 +574,53 @@ class KukutoolSession(DouyinPublicSession):
                 "Kukutool 网页未提供可复制的视频下载链接: "
                 + ", ".join(repr(value[:120]) for value in copied_values)
             )
+        entries = self._keep_best_video_and_all_images(entries)
+        best_video_url = next(
+            (entry["url"] for entry in entries if not self._is_image_or_live_photo(entry)),
+            entries[0]["url"],
+        )
         return {
-            "url": entries[-1]["url"],
-            "videos": [{"url": entries[-1]["url"], "video_fullinfo": entries}],
+            "url": best_video_url,
+            "videos": [{"url": best_video_url, "video_fullinfo": entries}],
         }
+
+    async def _read_more_sizes_entry(self, page, capture_enabled: bool) -> dict | None:
+        """Copy the optional large-file URL without triggering browser download."""
+        more_sizes = page.get_by_role("button", name=KUKUTOOL_MORE_SIZES_BUTTON_RE)
+        if not await more_sizes.count():
+            return None
+        await more_sizes.first.click()
+        dialog_text = await self._wait_for_more_sizes_dialog_or_notice(page)
+        if self._is_usage_notice(dialog_text):
+            dismiss = page.get_by_role("button", name=KUKUTOOL_NOTICE_DISMISS_BUTTON_RE)
+            if await dismiss.count():
+                await dismiss.first.click()
+                await page.wait_for_timeout(200)
+                await more_sizes.first.click()
+            dialog_text = await self._wait_for_more_sizes_dialog_or_notice(page)
+        if not self._is_more_sizes_dialog(dialog_text):
+            return None
+        size = self._parse_file_size(dialog_text)
+        copy_button = page.get_by_role("button", name=KUKUTOOL_COPY_LINK_BUTTON_RE)
+        if not await copy_button.count():
+            return None
+        download_url = await self._copy_download_url(page, copy_button.last, capture_enabled)
+        if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
+            return None
+        entry = {"type": "更多大小", "url": download_url}
+        if size is not None:
+            entry["size"] = size
+        return entry
+
+    async def _copy_download_url(self, page, copy_button, capture_enabled: bool) -> str:
+        capture_index = await self._clipboard_capture_length(page) if capture_enabled else 0
+        await copy_button.click()
+        download_url = await self._wait_for_captured_url(page, capture_index) if capture_enabled else ""
+        if not download_url:
+            download_url = await evaluate_with_navigation_retry(page, "navigator.clipboard.readText()")
+        if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
+            download_url = self._read_windows_clipboard()
+        return str(download_url)
 
     @staticmethod
     def _parse_quality_button_text(button_text: str) -> dict | None:
@@ -556,10 +632,50 @@ class KukutoolSession(DouyinPublicSession):
         multiplier = {"KB": 1024, "MB": 1024 * 1024, "GB": 1024 * 1024 * 1024}[unit]
         return {"type": match.group("quality"), "size": int(size * multiplier)}
 
+    @classmethod
+    def _parse_download_button_text(cls, button_text: str) -> dict | None:
+        quality_variant = cls._parse_quality_button_text(button_text)
+        if quality_variant is not None:
+            return quality_variant
+        match = KUKUTOOL_MEDIA_BUTTON_RE.match(button_text.strip())
+        if match is None:
+            return None
+        return {"type": f"无水印{match.group('media')}"}
+
+    @staticmethod
+    def _parse_file_size(text: str) -> int | None:
+        match = KUKUTOOL_FILE_SIZE_RE.search(text)
+        if match is None:
+            return None
+        multiplier = {"KB": 1024, "MB": 1024 * 1024, "GB": 1024 * 1024 * 1024}
+        return int(float(match.group("size")) * multiplier[match.group("unit").upper()])
+
+    @staticmethod
+    def _next_media_label(variant: dict, media_counts: dict[str, int]) -> str:
+        media_type = str(variant["type"])
+        media_counts[media_type] = media_counts.get(media_type, 0) + 1
+        ordinal = media_counts[media_type]
+        if ordinal == 1:
+            return media_type
+        return f"{media_type} {ordinal}"
+
+    @staticmethod
+    def _keep_best_video_and_all_images(entries: list[dict]) -> list[dict]:
+        images = [entry for entry in entries if KukutoolSession._is_image_or_live_photo(entry)]
+        videos = [entry for entry in entries if entry not in images]
+        best_video = max(videos, key=lambda entry: int(entry.get("size") or 0), default=None)
+        return ([best_video] if best_video is not None else []) + images
+
+    @staticmethod
+    def _is_image_or_live_photo(entry: dict) -> bool:
+        media_type = str(entry.get("type", ""))
+        return "图片" in media_type or "实况图" in media_type
+
     @staticmethod
     def _quality_result_wait_expression() -> str:
         return """() => [...document.querySelectorAll('button')]
-            .some((button) => /^下载\\s*.+?\\s*\\([\\d.]+\\s*(KB|MB|GB)\\)$/.test(button.innerText.trim()))"""
+            .some((button) => /^下载\\s*.+?\\s*\\([\\d.]+\\s*(KB|MB|GB)\\)$/.test(button.innerText.trim())
+                || /^下载无水印(视频|图片|实况图)$/.test(button.innerText.trim()))"""
 
     @staticmethod
     async def _install_clipboard_capture(page) -> bool:
@@ -636,9 +752,9 @@ class KukutoolSession(DouyinPublicSession):
         async with async_playwright() as playwright:
             browser = await playwright.chromium.connect_over_cdp(f"http://{self.host}:{self.port}")
             try:
-                page = self._find_kukutool_page(browser, base_url)
+                page = await self._find_kukutool_page(browser, base_url)
                 if page is None:
-                    raise RuntimeError("请先在专用 Chrome 中打开 https://dy.kukutool.com，并保持该页面打开")
+                    raise RuntimeError("请先在专用 Chrome 中打开 Kukutool 首页，并保持“开始解析”按钮可见")
                 await self._wait_for_user_to_clear_kukutool_gate(page, base_url=base_url)
                 await page.context.grant_permissions(
                     ["clipboard-read", "clipboard-write"],
@@ -655,13 +771,31 @@ class KukutoolSession(DouyinPublicSession):
         return results
 
     @staticmethod
-    def _find_kukutool_page(browser, base_url: str):
+    async def _find_kukutool_page(browser, base_url: str):
+        """Return the already-open Kukutool page that has its parse form rendered."""
         host = urlparse(base_url).netloc
         for context in browser.contexts:
             for page in context.pages:
-                if urlparse(page.url).netloc == host:
-                    return page
+                if urlparse(page.url).netloc != host:
+                    continue
+                try:
+                    parse_button = page.get_by_role("button", name=KUKUTOOL_PARSE_BUTTON_RE)
+                    if await parse_button.count():
+                        return page
+                except PlaywrightError:
+                    continue
         return None
+
+    @staticmethod
+    async def _wait_for_kukutool_input(page, *, timeout_seconds: int = 15):
+        """Locate Kuku's dynamic input without relying on its changing ARIA name."""
+        selector = "textarea, input:not([type]), input[type='text'], [contenteditable='true']"
+        for _ in range(timeout_seconds * 10):
+            text_boxes = page.locator(selector)
+            if await text_boxes.count():
+                return text_boxes.nth(0)
+            await page.wait_for_timeout(100)
+        raise RuntimeError("Kukutool 页面未加载链接输入框，请等待页面加载完成后重试")
 
     @staticmethod
     def _is_kukutool_page(page_url: str, base_url: str) -> bool:
@@ -689,6 +823,18 @@ class KukutoolSession(DouyinPublicSession):
                 continue
         raise PlaywrightTimeoutError("Kukutool quality results did not appear before timeout")
 
+    async def _wait_for_previous_results_to_clear(self, page, *, timeout_seconds: int = 10) -> None:
+        """Avoid treating the prior work's download buttons as the next result."""
+        for _ in range(timeout_seconds * 10):
+            has_results = await evaluate_with_navigation_retry(
+                page,
+                self._quality_result_wait_expression(),
+            )
+            if not has_results:
+                return
+            await page.wait_for_timeout(100)
+        raise RuntimeError("Kukutool 未清除上一条作品的解析结果，请点击“清除内容”后重试")
+
     async def _wait_for_user_to_clear_kukutool_gate(
         self,
         page,
@@ -698,6 +844,7 @@ class KukutoolSession(DouyinPublicSession):
     ) -> None:
         for _ in range(timeout_seconds):
             await self._wait_for_kukutool_page(page, base_url=base_url)
+            await self._dismiss_kukutool_ad_popup(page)
             has_gate = await evaluate_with_navigation_retry(
                 page,
                 "() => Boolean(document.querySelector('.fc-dialog-overlay, .fc-message-root'))"
@@ -706,6 +853,57 @@ class KukutoolSession(DouyinPublicSession):
                 return
             await page.wait_for_timeout(1000)
         raise RuntimeError("Kukutool 的广告或验证窗口仍未处理，请完成后重新解析")
+
+    async def _wait_for_more_sizes_dialog_or_notice(self, page, *, timeout_seconds: int = 20) -> str:
+        for _ in range(timeout_seconds * 5):
+            text = str(await evaluate_with_navigation_retry(page, "document.body.innerText"))
+            if self._is_usage_notice(text) or self._is_more_sizes_dialog(text):
+                return text
+            await page.wait_for_timeout(200)
+        return ""
+
+    @staticmethod
+    def _is_usage_notice(text: str) -> bool:
+        return "Usage notice" in text or "使用提示" in text
+
+    @staticmethod
+    def _is_more_sizes_dialog(text: str) -> bool:
+        return ("More sizes" in text or "更多大小" in text) and KUKUTOOL_FILE_SIZE_RE.search(text) is not None
+
+    async def _dismiss_kukutool_ad_popup(self, page) -> bool:
+        """Dismiss only generic first-page advertisements, never verification or size dialogs."""
+        page_text = str(await evaluate_with_navigation_retry(page, "document.body.innerText"))
+        if (
+            self._is_usage_notice(page_text)
+            or self._is_more_sizes_dialog(page_text)
+            or re.search(r"验证码|人机验证|captcha|recaptcha|hcaptcha", page_text, re.IGNORECASE)
+        ):
+            return False
+        try:
+            await page.keyboard.press("Escape")
+        except PlaywrightError:
+            pass
+        close_controls = page.locator(
+            "button[aria-label*='close' i], [role='button'][aria-label*='close' i], "
+            "button[aria-label*='关闭'], [role='button'][aria-label*='关闭'], "
+            "button[aria-label*='collapse' i], [role='button'][aria-label*='collapse' i], "
+            "button[aria-label*='收起'], [role='button'][aria-label*='收起'], "
+            "[title*='close' i], [title*='关闭'], [title*='collapse' i], [title*='收起']"
+        )
+        if await close_controls.count():
+            try:
+                await close_controls.last.click(timeout=1000)
+                return True
+            except PlaywrightError:
+                return False
+        icon_close_controls = page.get_by_text(re.compile(r"^(×|✕)$"))
+        if await icon_close_controls.count():
+            try:
+                await icon_close_controls.last.click(timeout=1000)
+                return True
+            except PlaywrightError:
+                return False
+        return False
 
     async def _parse_share_url_async(self, share_url: str, *, base_url: str) -> dict:
         result = (await self._parse_share_urls_async([share_url], base_url=base_url))[0]

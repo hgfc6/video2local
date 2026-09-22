@@ -263,6 +263,43 @@ def test_download_direct_media_url_writes_mp4_file_without_yt_dlp(tmp_path: Path
     run_mock.assert_not_called()
 
 
+def test_download_direct_image_url_uses_response_content_type_without_yt_dlp(tmp_path: Path) -> None:
+    service = YtDlpService(binary_name="yt-dlp")
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="735004-001",
+        title="图文作品",
+        author_name="赵六",
+        page_url="https://www.douyin.com/note/735004",
+        download_url="https://cdn.example.com/image-resource",
+        media_type="image",
+    )
+
+    class FakeResponse:
+        headers = {"Content-Type": "image/webp; charset=binary"}
+
+        def __init__(self) -> None:
+            self._chunks = [b"image-bytes", b""]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, size: int = -1) -> bytes:
+            return self._chunks.pop(0)
+
+    with patch("video2local.downloader.urlopen", return_value=FakeResponse()):
+        with patch.object(service, "_run_download_command") as command_mock:
+            file_ext, local_path = service.download(metadata=metadata, target_dir=tmp_path)
+
+    assert file_ext == "webp"
+    assert Path(local_path).read_bytes() == b"image-bytes"
+    command_mock.assert_not_called()
+
+
 def test_download_direct_media_streams_large_response_in_chunks(tmp_path: Path) -> None:
     service = YtDlpService(binary_name="yt-dlp")
     metadata = VideoMetadata(

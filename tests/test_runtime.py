@@ -41,7 +41,184 @@ def test_launch_chrome_creates_directories_and_starts_process(tmp_path: Path) ->
     assert settings.paths.chrome_profile_dir.exists()
     assert settings.paths.downloads_dir.exists() is False
     detect_mock.assert_called_once_with(settings.paths.chrome_profile_dir)
-    popen_mock.assert_called_once_with(launch_spec.to_argv())
+    popen_mock.assert_called_once_with(
+        launch_spec.to_argv(
+            (
+                "https://www.douyin.com/user/self?from_tab_name=main&showSubTab=video&showTab=favorite_collection",
+                settings.share_resolvers.kukutool_base_url,
+            )
+        )
+    )
+
+
+def test_sync_variant_selection_keeps_best_video_and_all_images(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    variants = [
+        VideoVariant("540", "540p", "unknown", None, 1, None, None, "https://cdn.example.com/540.mp4"),
+        VideoVariant("1080", "1080p", "unknown", None, 3, None, None, "https://cdn.example.com/1080.mp4"),
+        VideoVariant("image-1", "无水印图片", "unknown", None, None, None, None, "https://cdn.example.com/1.jpg"),
+        VideoVariant("image-2", "无水印图片 2", "unknown", None, None, None, None, "https://cdn.example.com/2.jpg"),
+    ]
+
+    selected = runtime._select_sync_variants(variants)
+
+    assert [item.download_url for item in selected] == [
+        "https://cdn.example.com/540.mp4",
+        "https://cdn.example.com/1.jpg",
+        "https://cdn.example.com/2.jpg",
+    ]
+
+
+def test_sync_uses_largest_kukutool_video_even_when_native_is_higher_quality(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    variants = [
+        VideoVariant("native", "2160p", "H.265", None, 99, None, None, "https://native.example.com/2160.mp4", provider_id="native"),
+        VideoVariant("kuku-small", "720p", "unknown", None, 10, None, None, "https://kuku.example.com/720.mp4", provider_id="kukutool"),
+        VideoVariant("kuku-large", "1080p", "unknown", None, 20, None, None, "https://kuku.example.com/1080.mp4", provider_id="kukutool"),
+    ]
+
+    selected = runtime._select_sync_variants(variants)
+
+    assert [item.download_url for item in selected] == ["https://kuku.example.com/1080.mp4"]
+
+
+def test_video_post_sync_does_not_download_kukutool_image_attachments(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    variants = [
+        VideoVariant("video", "1080p", "unknown", None, 20, None, None, "https://kuku.example.com/video.mp4", provider_id="kukutool"),
+        VideoVariant("image", "无水印图片", "unknown", None, None, None, None, "https://kuku.example.com/image.jpg", provider_id="kukutool"),
+    ]
+
+    selected = runtime._select_sync_variants(
+        variants,
+        page_url="https://www.douyin.com/video/7662725384303208805",
+    )
+
+    assert [item.download_url for item in selected] == ["https://kuku.example.com/video.mp4"]
+
+
+def test_preview_limits_only_kukutool_video_variants_to_largest_two(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    variants = [
+        VideoVariant("540", "540p", "unknown", None, 5, None, None, "https://kuku.example.com/540.mp4"),
+        VideoVariant("720", "720p", "unknown", None, 10, None, None, "https://kuku.example.com/720.mp4"),
+        VideoVariant("1080", "1080p", "unknown", None, 20, None, None, "https://kuku.example.com/1080.mp4"),
+        VideoVariant("image", "无水印图片", "unknown", None, None, None, None, "https://kuku.example.com/1.jpg"),
+    ]
+
+    limited = runtime._limit_kukutool_preview_variants(variants, 2)
+
+    assert [item.download_url for item in limited] == [
+        "https://kuku.example.com/1080.mp4",
+        "https://kuku.example.com/720.mp4",
+        "https://kuku.example.com/1.jpg",
+    ]
+
+
+def test_sync_image_metadata_uses_zero_padded_file_suffix(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="735001",
+        title="图文作品",
+        author_name="作者A",
+        page_url="https://www.douyin.com/note/735001",
+        download_url="https://cdn.example.com/video.mp4",
+    )
+    image_variants = [
+        VideoVariant("image-1", "无水印图片", "unknown", None, None, None, None, "https://cdn.example.com/1.jpg"),
+        VideoVariant("image-2", "无水印图片 2", "unknown", None, None, None, None, "https://cdn.example.com/2.jpg"),
+    ]
+    preview_item = type("Preview", (), {"metadata": metadata, "variants": image_variants})()
+
+    runtime._build_preview_item = lambda **_: preview_item  # type: ignore[method-assign]
+    items = list(
+        runtime._iter_sync_items(
+            source=type("Source", (), {"platform": "douyin", "source_type": SourceType.FAVORITES})(),
+            cookies_path=tmp_path / "cookies.txt",
+            candidate_urls=[metadata.page_url],
+        )
+    )
+
+    assert [item.video_id for item in items] == ["735001-001", "735001-002"]
+    assert [item.title for item in items] == ["图文作品", "图文作品"]
+
+
+def test_douyin_card_hint_fills_unknown_kukutool_image_author(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    page_url = "https://www.douyin.com/note/7662725384303208805"
+    runtime._douyin_card_hints = runtime._extract_douyin_card_hints(
+        '<a href="/note/7662725384303208805"><img alt="图文作者：图文作品文案"></a>'
+    )
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="7662725384303208805",
+        title="7662725384303208805",
+        author_name="unknown",
+        page_url=page_url,
+        download_url="https://cdn.example.com/1.jpg",
+    )
+
+    enriched = runtime._apply_douyin_card_hint(metadata, page_url)
+
+    assert enriched.author_name == "图文作者"
+    assert enriched.title == "图文作品文案"
+
+
+def test_collect_douyin_candidates_ignores_non_card_video_links(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    source = type(
+        "Source",
+        (),
+        {
+            "platform": "douyin",
+            "source_type": SourceType.FAVORITES,
+            "page_url": "https://www.douyin.com/user/self?showTab=favorite_collection",
+        },
+    )()
+    html = (
+        '<a href="/note/7662725384303208805"><img alt="收藏作者：收藏图文"></a>'
+        '<footer><a href="/video/7044844322700791077">推荐作品</a></footer>'
+    )
+
+    with patch(
+        "video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots",
+        return_value=[html],
+    ):
+        candidates = runtime._collect_candidate_urls(source)
+
+    assert candidates == ["https://www.douyin.com/note/7662725384303208805"]
+
+
+def test_collect_douyin_candidates_keeps_card_without_author_caption_alt_text(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    source = type(
+        "Source",
+        (),
+        {
+            "platform": "douyin",
+            "source_type": SourceType.FAVORITES,
+            "page_url": "https://www.douyin.com/user/self?showTab=favorite_collection",
+        },
+    )()
+    html = (
+        '<a href="/note/7662725384303208805"><img alt="收藏作者：收藏图文"></a>'
+        '<a href="/video/7662221016828094958"><img alt="作品封面"></a>'
+        '<footer><a href="/video/7044844322700791077">推荐作品</a></footer>'
+    )
+
+    with patch(
+        "video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots",
+        return_value=[html],
+    ):
+        candidates = runtime._collect_candidate_urls(source)
+
+    assert candidates == [
+        "https://www.douyin.com/note/7662725384303208805",
+        "https://www.douyin.com/video/7662221016828094958",
+    ]
 
 
 def test_runtime_configures_native_share_resolver_only_by_default(tmp_path: Path) -> None:
@@ -432,6 +609,8 @@ def test_start_sync_uses_kukutool_share_resolver_sequentially_when_enabled(tmp_p
     assert detail_mock.call_count == 2
     probe_mock.assert_not_called()
     assert [item.video_id for item in captured_items] == ["735001", "735002"]
+    assert [item.author_name for item in captured_items] == ["author-735001", "author-735002"]
+    assert [item.title for item in captured_items] == ["title-735001", "title-735002"]
     assert captured_items[0].download_url == "https://cdn.example.com/735001-ultra.mp4"
     assert captured_items[1].download_url == "https://cdn.example.com/735002-ultra.mp4"
 
@@ -1128,76 +1307,6 @@ def test_parse_share_text_returns_metadata_and_variants_without_login(tmp_path: 
     assert result.variants[0].file_size == 2086404
 
 
-def test_parse_share_text_returns_download_all_option_for_image_post(tmp_path: Path) -> None:
-    settings = AppSettings.default_for_root(tmp_path)
-    runtime = AppRuntime(settings=settings)
-    payload = {
-        "aweme_detail": {
-            "aweme_id": "7651428709099242128",
-            "desc": "分享图文",
-            "author": {"nickname": "香菜严选"},
-            "images": [
-                {"url_list": ["https://img.example.com/one.jpg"]},
-                {"url_list": ["https://img.example.com/two.jpg"]},
-            ],
-        }
-    }
-
-    with patch(
-        "video2local.app_runtime.DouyinPublicSession.fetch_share_aweme_detail",
-        return_value=("https://www.douyin.com/note/7651428709099242128", payload),
-    ):
-        result = runtime.parse_share_text("https://v.douyin.com/example/")
-
-    assert result.metadata.image_urls == (
-        "https://img.example.com/one.jpg",
-        "https://img.example.com/two.jpg",
-    )
-    assert result.variants[0].variant_id == "image_post"
-    assert result.variants[0].quality_label == "图文（2 张）"
-
-
-def test_download_share_variant_downloads_every_image_in_image_post(tmp_path: Path) -> None:
-    settings = AppSettings.default_for_root(tmp_path)
-    runtime = AppRuntime(settings=settings)
-    output_dir = tmp_path / "output"
-    runtime.set_output_root(output_dir)
-    runtime.set_flat_output(True)
-    metadata = VideoMetadata(
-        platform="douyin",
-        source_type=SourceType.SHARE_LINK,
-        video_id="7651428709099242128",
-        title="#分享图文",
-        author_name="香菜严选",
-        page_url="https://www.douyin.com/note/7651428709099242128",
-        download_url="https://img.example.com/one.jpg",
-        image_urls=("https://img.example.com/one.jpg", "https://img.example.com/two.jpg"),
-    )
-    variant = VideoVariant(
-        variant_id="image_post",
-        quality_label="图文（2 张）",
-        codec_label="图片",
-        bit_rate=None,
-        file_size=None,
-        width=None,
-        height=None,
-        download_url=metadata.download_url,
-    )
-    parse_result = ShareParseResult(
-        provider_id="native",
-        source_url="https://v.douyin.com/example/",
-        canonical_url=metadata.page_url,
-        metadata=metadata,
-        variants=[variant],
-    )
-
-    with patch.object(runtime.downloader, "download_images", return_value=[str(output_dir / "分享图文-7651428709099242128-001.jpg"), str(output_dir / "分享图文-7651428709099242128-002.jpg")]) as download_images:
-        result = runtime.download_share_variant(parse_result, "image_post")
-
-    assert result.local_path.endswith("-002.jpg")
-    assert download_images.call_args.kwargs["filename_stem"] == "分享图文-7651428709099242128"
-
-
 def test_parse_share_text_prefers_signed_web_api_variants_when_available(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     runtime = AppRuntime(settings=settings)
@@ -1378,6 +1487,35 @@ def test_download_share_variant_saves_selected_quality_with_quality_suffix(tmp_p
     assert download_mock.call_args.args[0].download_url == "https://cdn.example.com/720.mp4"
     assert download_mock.call_args.kwargs["filename_stem"] == "分享视频-7651428709099242127-720p"
     assert download_mock.call_args.args[1] == custom_dir / "douyin" / "香菜严选"
+
+
+def test_download_image_share_variant_downloads_all_images_with_numbered_ids(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    runtime.set_output_root(tmp_path)
+    runtime.set_flat_output(True)
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.SHARE_LINK,
+        video_id="7651428709099242128",
+        title="#分享图文",
+        author_name="香菜严选",
+        page_url="https://www.douyin.com/note/7651428709099242128",
+        download_url="https://cdn.example.com/one.jpg",
+    )
+    image_variants = [
+        VideoVariant("image-1", "无水印图片", "图片", None, None, None, None, "https://cdn.example.com/one.jpg"),
+        VideoVariant("image-2", "无水印图片 2", "图片", None, None, None, None, "https://cdn.example.com/two.jpg"),
+    ]
+    parse_result = ShareParseResult("kukutool", "https://v.douyin.com/demo/", metadata.page_url, metadata, image_variants)
+
+    with patch.object(runtime.downloader, "download", side_effect=[("jpg", str(tmp_path / "分享图文-7651428709099242128-001.jpg")), ("jpg", str(tmp_path / "分享图文-7651428709099242128-002.jpg"))]) as download_mock:
+        result = runtime.download_share_variant(parse_result, "image-2")
+
+    assert result.local_path.endswith("-002.jpg")
+    assert [call.args[0].video_id for call in download_mock.call_args_list] == [
+        "7651428709099242128-001",
+        "7651428709099242128-002",
+    ]
 
 
 def test_download_share_variant_can_write_directly_into_output_root(tmp_path: Path) -> None:

@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from dataclasses import replace
+from html import unescape
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 
@@ -37,6 +39,7 @@ class AppRuntime:
         self.retry_count: int = 1
         self.flat_output = False
         self._latest_sync_run: dict | None = None
+        self._douyin_card_hints: dict[str, tuple[str, str]] = {}
         self.archive_manager = ArchiveManager(self.settings.paths.downloads_dir)
         self.downloader = YtDlpService()
         self.sync_engine = SyncEngine(
@@ -82,7 +85,14 @@ class AppRuntime:
     def launch_chrome(self) -> None:
         self.ensure_directories()
         launch_spec = ChromeLaunchSpec.detect(self.settings.paths.chrome_profile_dir)
-        subprocess.Popen(launch_spec.to_argv())
+        subprocess.Popen(
+            launch_spec.to_argv(
+                (
+                    "https://www.douyin.com/user/self?from_tab_name=main&showSubTab=video&showTab=favorite_collection",
+                    self.settings.share_resolvers.kukutool_base_url,
+                )
+            )
+        )
 
     def get_current_source(self) -> SourceDescriptor:
         self.ensure_directories()
@@ -173,7 +183,7 @@ class AppRuntime:
         cookies_path = self.browser_session.export_cookies(self.settings.paths.data_dir / "yt-dlp-cookies.txt")
         candidate_urls = self._collect_candidate_urls(source)
         kukutool_resolutions = (
-            self._resolve_kukutool_preview_candidates([url for url in candidate_urls if "/video/" in url])
+            self._resolve_kukutool_preview_candidates(candidate_urls)
             if source.platform == "douyin"
             else {}
         )
@@ -187,6 +197,7 @@ class AppRuntime:
                     source=source,
                     cookies_path=cookies_path,
                     kukutool_resolution=kukutool_resolutions.get(url),
+                    kukutool_variant_limit=2,
                 )
             except Exception as exc:
                 skipped_items.append(self._build_skipped_item(source, url, exc, stage="preview_metadata"))
@@ -263,18 +274,11 @@ class AppRuntime:
 
         target_dir = self.output_root / "_smoke_test"
         target_dir.mkdir(parents=True, exist_ok=True)
-        if metadata.image_urls:
-            filename_stem = self.archive_manager.build_filename_stem(
-                video_id=metadata.video_id,
-                title=metadata.title,
-            )
-            local_path = self.downloader.download_images(
-                metadata,
-                target_dir,
-                filename_stem=filename_stem,
-            )[0]
-        else:
-            _, local_path = self.downloader.download(metadata, target_dir, cookies_file=cookies_path if source.platform != "douyin" else None)
+        _, local_path = self.downloader.download(
+            metadata,
+            target_dir,
+            cookies_file=cookies_path if source.platform != "douyin" else None,
+        )
         return SampleDownloadResult(metadata=metadata, local_path=local_path)
 
     def parse_share_text(self, raw_text: str) -> ShareParseResult:
@@ -288,36 +292,21 @@ class AppRuntime:
             source_type=SourceType.SHARE_LINK,
             page_url=resolution.canonical_url,
         )
-        if metadata.image_urls:
-            variants = [
-                VideoVariant(
-                    variant_id="image_post",
-                    quality_label=f"图文（{len(metadata.image_urls)} 张）",
-                    codec_label="图片",
-                    bit_rate=None,
-                    file_size=None,
-                    width=None,
-                    height=None,
-                    download_url=metadata.download_url,
-                    is_recommended=True,
-                    provider_id=resolution.provider_id,
-                )
-            ]
-        else:
-            variants = self._tag_variants(
-                self.adapter.parse_share_variants(resolution.payload),
-                resolution.provider_id,
-            )
+        variants = self._tag_variants(
+            self.adapter.parse_share_variants(resolution.payload),
+            resolution.provider_id,
+        )
         if not variants:
             raise RuntimeError("未解析到可下载版本")
-        if not metadata.image_urls:
-            variants = [
-                replace(
-                    variant,
-                    file_size=variant.file_size or self.public_session.probe_content_length(variant.download_url),
-                )
-                for variant in variants
-            ]
+        variants = [
+            replace(
+                variant,
+                file_size=variant.file_size or self.public_session.probe_content_length(variant.download_url),
+            )
+            if not self._is_image_variant(variant)
+            else variant
+            for variant in variants
+        ]
         return ShareParseResult(
             provider_id=resolution.provider_id,
             source_url=share_url,
@@ -343,21 +332,22 @@ class AppRuntime:
             target_dir = (
                 self.output_root
                 / self.archive_manager.safe_name(metadata.platform)
-                / self.archive_manager.safe_name(metadata.author_name)
+                / self.archive_manager.build_author_directory_name(metadata)
             )
         target_dir.mkdir(parents=True, exist_ok=True)
-        if metadata.image_urls:
-            filename_stem = self.archive_manager.build_filename_stem(
-                video_id=metadata.video_id,
-                title=metadata.title,
-            )
-            local_path = "; ".join(
-                self.downloader.download_images(
+        if self._is_image_variant(variant):
+            image_variants = [item for item in parse_result.variants if self._is_image_variant(item)]
+            local_paths: list[str] = []
+            for index, image_variant in enumerate(image_variants, start=1):
+                image_metadata = replace(
                     metadata,
-                    target_dir,
-                    filename_stem=filename_stem,
+                    video_id=f"{metadata.video_id}-{index:03d}",
+                    download_url=image_variant.download_url,
+                    media_type="live_photo" if "实况图" in image_variant.quality_label else "image",
                 )
-            )
+                _, local_path = self.downloader.download(image_metadata, target_dir)
+                local_paths.append(local_path)
+            local_path = "; ".join(local_paths)
         else:
             filename_stem = self.archive_manager.build_filename_stem(
                 video_id=metadata.video_id,
@@ -449,7 +439,7 @@ class AppRuntime:
         cookies_path: Path,
         candidate_urls: list[str],
     ):
-        seen_video_keys: set[tuple[str, str]] = set()
+        seen_media_keys: set[tuple[str, str, str]] = set()
         yielded = 0
         for url in candidate_urls:
             try:
@@ -462,12 +452,43 @@ class AppRuntime:
                 yielded += 1
                 yield self._build_skipped_item(source, url, exc, stage="sync_metadata")
                 continue
-            video_key = (preview_item.metadata.platform, preview_item.metadata.video_id)
-            if video_key in seen_video_keys:
-                continue
-            seen_video_keys.add(video_key)
-            yielded += 1
-            yield preview_item.metadata
+            variants = self._select_sync_variants(
+                preview_item.variants,
+                page_url=preview_item.metadata.page_url,
+            )
+            if not variants:
+                variants = [None]
+            image_ordinal = 0
+            for variant in variants:
+                metadata = preview_item.metadata
+                if variant is not None:
+                    media_key = (metadata.platform, metadata.video_id, variant.download_url)
+                    if media_key in seen_media_keys:
+                        continue
+                    seen_media_keys.add(media_key)
+                    if self._is_image_variant(variant):
+                        image_ordinal += 1
+                        media_type = "image" if "图片" in variant.quality_label else "live_photo"
+                        metadata = replace(
+                            metadata,
+                            video_id=f"{metadata.video_id}-{image_ordinal:03d}",
+                            download_url=variant.download_url,
+                            format_selector=variant.format_selector,
+                            media_type=media_type,
+                        )
+                    else:
+                        metadata = replace(
+                            metadata,
+                            download_url=variant.download_url,
+                            format_selector=variant.format_selector,
+                        )
+                else:
+                    media_key = (metadata.platform, metadata.video_id, metadata.download_url)
+                    if media_key in seen_media_keys:
+                        continue
+                    seen_media_keys.add(media_key)
+                yielded += 1
+                yield metadata
         if yielded == 0:
             raise RuntimeError("当前页面未发现可下载视频，请确认已登录，并等待作品或收藏列表加载完成后再试。")
 
@@ -480,7 +501,18 @@ class AppRuntime:
             target_url=source.page_url,
             **snapshot_options,
         ):
+            card_hints: dict[str, tuple[str, str]] = {}
+            card_urls: set[str] = set()
+            if source.platform == "douyin":
+                card_hints = self._extract_douyin_card_hints(html)
+                card_urls = self._extract_douyin_card_urls(html)
+                self._douyin_card_hints.update(card_hints)
             for url in adapter.collect_candidate_urls(html):
+                # A Douyin page contains footer, recommendation and search links
+                # that look exactly like work URLs. Once real collection/work
+                # cards are present, only accept links from those cards.
+                if source.platform == "douyin" and card_urls and url not in card_urls:
+                    continue
                 if url in seen_urls:
                     continue
                 seen_urls.add(url)
@@ -488,6 +520,57 @@ class AppRuntime:
         if self.sync_limit is not None:
             candidate_urls = candidate_urls[: self.sync_limit]
         return candidate_urls
+
+    @staticmethod
+    def _extract_douyin_card_hints(html: str) -> dict[str, tuple[str, str]]:
+        """Read author/caption exposed on visible Douyin video and note cards.
+
+        Kuku deliberately returns no author information for image downloads.  The
+        source card remains a reliable fallback when Douyin detail lookup is
+        unavailable or disabled.
+        """
+        hints: dict[str, tuple[str, str]] = {}
+        pattern = re.compile(
+            r'href=["\'][^"\']*/(?P<kind>video|note)/(?P<id>\d+)[^"\']*["\'][\s\S]{0,2000}?'
+            r'<img[^>]*\balt=["\'](?P<alt>[^"\']+)',
+            re.IGNORECASE,
+        )
+        for match in pattern.finditer(html):
+            alt = unescape(match.group("alt")).strip()
+            separator = "：" if "：" in alt else ":"
+            if separator not in alt:
+                continue
+            author_name, title = (part.strip() for part in alt.split(separator, 1))
+            if not author_name or not title:
+                continue
+            page_url = f"https://www.douyin.com/{match.group('kind')}/{match.group('id')}"
+            hints.setdefault(page_url, (author_name, title))
+        return hints
+
+    @staticmethod
+    def _extract_douyin_card_urls(html: str) -> set[str]:
+        """Identify visible work cards without requiring author/caption text."""
+        pattern = re.compile(
+            r'<a\b[^>]*\bhref=["\'][^"\']*/(?P<kind>video|note)/(?P<id>\d+)[^"\']*["\'][^>]*>'
+            r'(?P<body>[\s\S]{0,2000}?)</a>',
+            re.IGNORECASE,
+        )
+        return {
+            f"https://www.douyin.com/{match.group('kind')}/{match.group('id')}"
+            for match in pattern.finditer(html)
+            if re.search(r"<img\b", match.group("body"), re.IGNORECASE)
+        }
+
+    def _apply_douyin_card_hint(self, metadata: VideoMetadata, page_url: str) -> VideoMetadata:
+        hint = self._douyin_card_hints.get(page_url)
+        if hint is None:
+            return metadata
+        author_name, title = hint
+        return replace(
+            metadata,
+            author_name=author_name if metadata.author_name == "unknown" else metadata.author_name,
+            title=title if not metadata.title or metadata.title == metadata.video_id else metadata.title,
+        )
 
     def _build_skipped_item(
         self,
@@ -520,13 +603,16 @@ class AppRuntime:
         source: SourceDescriptor,
         cookies_path: Path,
         kukutool_resolution: object | None = None,
+        kukutool_variant_limit: int | None = None,
     ) -> SyncPreviewItem:
         if source.platform == "douyin":
-            metadata, provider_summary, variant_summary, selected_variant = self._resolve_douyin_sync_metadata(
+            metadata, provider_summary, variant_summary, selected_variant, variants = self._resolve_douyin_sync_metadata(
                 page_url=page_url,
                 source_type=source.source_type,
                 cookies_path=cookies_path,
                 kukutool_resolution=kukutool_resolution,
+                kukutool_variant_limit=kukutool_variant_limit,
+                include_variants=True,
             )
             return SyncPreviewItem(
                 metadata=metadata,
@@ -534,6 +620,7 @@ class AppRuntime:
                 variant_summary=variant_summary,
                 selected_quality_label=None if selected_variant is None else selected_variant.quality_label,
                 selected_file_size=None if selected_variant is None else selected_variant.file_size,
+                variants=variants,
             )
         if source.platform == "bilibili":
             payload = self.downloader.probe_video_info(url=page_url, cookies_file=cookies_path)
@@ -574,14 +661,15 @@ class AppRuntime:
         source_type: SourceType,
         cookies_path: Path,
         kukutool_resolution: object | None = None,
-    ) -> tuple[VideoMetadata, str, str, VideoVariant | None]:
+        kukutool_variant_limit: int | None = None,
+        include_variants: bool = False,
+    ) -> tuple[VideoMetadata, str, str, VideoVariant | None] | tuple[VideoMetadata, str, str, VideoVariant | None, list[VideoVariant]]:
         metadata: VideoMetadata | None = None
         provider_labels: list[str] = []
         merged_variants: list[VideoVariant] = []
         resolver_errors: list[Exception] = []
 
-        is_image_post = "/note/" in page_url
-        if not is_image_post and "kukutool" in self.resolver_sources and self.settings.share_resolvers.enable_kukutool_fallback:
+        if "kukutool" in self.resolver_sources and self.settings.share_resolvers.enable_kukutool_fallback:
             try:
                 if isinstance(kukutool_resolution, Exception):
                     raise kukutool_resolution
@@ -593,15 +681,18 @@ class AppRuntime:
                     source_type=source_type,
                     page_url=resolution.canonical_url,
                 )
-                merged_variants.extend(
-                    self._tag_variants(self.adapter.parse_share_variants(resolution.payload), resolution.provider_id)
+                kukutool_video = (resolution.payload.get("aweme_detail") or {}).get("video") or {}
+                kukutool_variants = self._limit_kukutool_preview_variants(
+                    self.adapter._build_kukutool_variants(kukutool_video),
+                    kukutool_variant_limit,
                 )
+                merged_variants.extend(self._tag_variants(kukutool_variants, resolution.provider_id))
                 provider_labels.append(resolution.provider_id)
             except Exception as exc:
                 resolver_errors.append(exc)
                 provider_labels.append("kukutool(失败)")
 
-        if "native" in self.resolver_sources or is_image_post:
+        if "native" in self.resolver_sources:
             try:
                 detail_payload = self.browser_session.fetch_douyin_aweme_detail(page_url)
                 native_metadata = self.adapter.parse_aweme_detail(
@@ -610,6 +701,8 @@ class AppRuntime:
                     page_url=page_url,
                 )
                 metadata = native_metadata
+                # Keep every original format for the preview. Synchronization
+                # still prefers Kuku's largest downloadable link.
                 merged_variants.extend(self._tag_variants(self.adapter.parse_share_variants(detail_payload), "native"))
                 if "native" not in provider_labels:
                     provider_labels.append("native")
@@ -630,11 +723,24 @@ class AppRuntime:
                 ) from resolver_errors[-1]
             raise RuntimeError("已选解析来源未返回可用结果")
 
-        selected_variant = self._select_sync_variant(self._merge_sync_variants(merged_variants))
+        metadata = self._apply_douyin_card_hint(metadata, page_url)
+        merged_variants = self._merge_sync_variants(merged_variants)
+        kukutool_videos = [
+            variant
+            for variant in merged_variants
+            if variant.provider_id == "kukutool" and not self._is_image_variant(variant)
+        ]
+        selected_variant = (
+            max(kukutool_videos, key=lambda item: item.file_size or 0)
+            if kukutool_videos
+            else self._select_sync_variant(merged_variants)
+        )
         if selected_variant is not None:
             metadata = replace(metadata, download_url=selected_variant.download_url)
         provider_summary = " + ".join(provider_labels) if provider_labels else "native"
-        variant_summary = self._build_variant_summary(self._merge_sync_variants(merged_variants))
+        variant_summary = self._build_variant_summary(merged_variants)
+        if include_variants:
+            return metadata, provider_summary, variant_summary, selected_variant, merged_variants
         return metadata, provider_summary, variant_summary, selected_variant
 
     def _resolve_provider(
@@ -705,12 +811,37 @@ class AppRuntime:
             return None
         return variants[0]
 
+    @staticmethod
+    def _is_image_variant(variant: VideoVariant) -> bool:
+        return "图片" in variant.quality_label or "实况图" in variant.quality_label
+
+    def _select_sync_variants(
+        self,
+        variants: list[VideoVariant],
+        *,
+        page_url: str | None = None,
+    ) -> list[VideoVariant]:
+        """Download the largest Kuku video; only note posts retain image attachments."""
+        kukutool_variants = [variant for variant in variants if variant.provider_id == "kukutool"]
+        preferred_variants = kukutool_variants or variants
+        image_variants = [variant for variant in preferred_variants if self._is_image_variant(variant)]
+        video_variants = [variant for variant in preferred_variants if not self._is_image_variant(variant)]
+        selected_video = (
+            max(video_variants, key=lambda item: item.file_size or 0)
+            if kukutool_variants and video_variants
+            else self._select_sync_variant(video_variants)
+        )
+        if page_url and "/video/" in page_url:
+            return [selected_video] if selected_video is not None else []
+        return ([selected_video] if selected_video is not None else []) + image_variants
+
     def _merge_sync_variants(self, variants: list[VideoVariant]) -> list[VideoVariant]:
-        deduped: dict[str, VideoVariant] = {}
+        deduped: dict[tuple[str, str], VideoVariant] = {}
         for variant in variants:
-            existing = deduped.get(variant.quality_label)
+            key = (variant.provider_id or "native", variant.quality_label)
+            existing = deduped.get(key)
             if existing is None or self.adapter._variant_priority(variant) > self.adapter._variant_priority(existing):
-                deduped[variant.quality_label] = variant
+                deduped[key] = variant
         merged = list(deduped.values())
         merged.sort(
             key=lambda item: (
@@ -721,6 +852,18 @@ class AppRuntime:
             reverse=True,
         )
         return merged
+
+    def _limit_kukutool_preview_variants(
+        self,
+        variants: list[VideoVariant],
+        limit: int | None,
+    ) -> list[VideoVariant]:
+        if limit is None:
+            return variants
+        attachments = [variant for variant in variants if self._is_image_variant(variant)]
+        videos = [variant for variant in variants if not self._is_image_variant(variant)]
+        videos.sort(key=lambda item: item.file_size or 0, reverse=True)
+        return videos[:limit] + attachments
 
     def _tag_variants(self, variants: list[VideoVariant], provider_id: str) -> list[VideoVariant]:
         return [replace(variant, provider_id=provider_id) for variant in variants]

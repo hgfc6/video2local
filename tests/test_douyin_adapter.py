@@ -91,11 +91,12 @@ def test_parse_aweme_detail_uses_highest_bitrate_media_url() -> None:
     assert metadata.download_url == "https://cdn.example.com/high.mp4"
 
 
-def test_collect_candidate_urls_returns_unique_absolute_video_urls() -> None:
+def test_collect_candidate_urls_returns_unique_absolute_video_and_note_urls() -> None:
     adapter = DouyinAdapter()
     html = """
     <a href="/video/735001">one</a>
     <a href="https://www.douyin.com/video/735002">two</a>
+    <a href="/note/735003">image post</a>
     <a href="/video/735001">duplicate</a>
     """
 
@@ -104,6 +105,7 @@ def test_collect_candidate_urls_returns_unique_absolute_video_urls() -> None:
     assert urls == [
         "https://www.douyin.com/video/735001",
         "https://www.douyin.com/video/735002",
+        "https://www.douyin.com/note/735003",
     ]
 
 
@@ -115,33 +117,6 @@ def test_collect_candidate_urls_includes_image_post_urls_but_not_live_urls() -> 
     )
 
     assert urls == ["https://www.douyin.com/note/735003"]
-
-
-def test_parse_aweme_detail_extracts_image_post_urls() -> None:
-    adapter = DouyinAdapter()
-    payload = {
-        "aweme_detail": {
-            "aweme_id": "735003",
-            "desc": "图文作品",
-            "author": {"nickname": "作者"},
-            "images": [
-                {"url_list": ["https://img.example.com/one.jpg"]},
-                {"display_image": {"url_list": ["https://img.example.com/two.jpg"]}},
-            ],
-        }
-    }
-
-    metadata = adapter.parse_aweme_detail(
-        payload,
-        source_type=SourceType.FAVORITES,
-        page_url="https://www.douyin.com/note/735003",
-    )
-
-    assert metadata.download_url == "https://img.example.com/one.jpg"
-    assert metadata.image_urls == (
-        "https://img.example.com/one.jpg",
-        "https://img.example.com/two.jpg",
-    )
 
 
 def test_extract_share_url_pulls_short_link_from_raw_douyin_share_text() -> None:
