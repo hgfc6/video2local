@@ -23,7 +23,7 @@ class MainController:
     sync_limit_text: str = ""
     retry_count_text: str = "1"
     flat_output_enabled: bool = False
-    resolver_sources: tuple[str, ...] = ("native", "kukutool")
+    resolver_sources: tuple[str, ...] = ("native", "kukutool", "cdn")
     platform_mode: str = "douyin"
 
     def __post_init__(self) -> None:

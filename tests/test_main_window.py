@@ -45,6 +45,7 @@ def test_main_window_builds_buttons_and_status_label() -> None:
     assert not hasattr(window, "quality_strategy_input")
     assert window.native_resolver_checkbox.isChecked() is True
     assert window.kukutool_resolver_checkbox.isChecked() is True
+    assert window.cdn_resolver_checkbox.isChecked() is True
     assert window.share_input.placeholderText() == "粘贴抖音分享文案、短链或视频链接"
     assert window.parse_share_button.text() == "解析分享链接"
     assert window.download_share_button.text() == "下载所选版本"

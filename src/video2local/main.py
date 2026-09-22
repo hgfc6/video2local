@@ -17,7 +17,7 @@ def main() -> int:
         supported_source_types=("favorites", "author_videos"),
         share_resolvers=ShareResolverSettings(
             enable_kukutool_fallback=True,
-            enabled_sources=("native", "kukutool"),
+            enabled_sources=("native", "kukutool", "cdn"),
         ),
     )
     controller = MainController(engine=AppRuntime(settings=settings))

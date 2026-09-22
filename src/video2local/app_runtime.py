@@ -15,7 +15,7 @@ from video2local.browser import ChromeLaunchSpec, ChromeRemoteSession, DouyinPub
 from video2local.config import AppSettings
 from video2local.downloader import YtDlpService
 from video2local.domain import SampleDownloadResult, ShareParseResult, ShareVariantDownloadResult, SkippedSyncItem, SourceType, SyncPreviewItem, SyncPreviewResult, SyncProgress, SyncRunStatus, VideoMetadata, VideoVariant
-from video2local.resolvers import KukutoolResolver, NativeDouyinResolver, ResolverChain
+from video2local.resolvers import CdnDouyinResolver, KukutoolResolver, NativeDouyinResolver, ResolverChain
 from video2local.sync_engine import SyncEngine, SyncSummary
 
 
@@ -197,7 +197,6 @@ class AppRuntime:
                     source=source,
                     cookies_path=cookies_path,
                     kukutool_resolution=kukutool_resolutions.get(url),
-                    kukutool_variant_limit=2,
                 )
             except Exception as exc:
                 skipped_items.append(self._build_skipped_item(source, url, exc, stage="preview_metadata"))
@@ -222,7 +221,7 @@ class AppRuntime:
         )
 
     def _resolve_kukutool_preview_candidates(self, candidate_urls: list[str]) -> dict[str, object]:
-        if "kukutool" not in self.resolver_sources or not self.settings.share_resolvers.enable_kukutool_fallback:
+        if not self._is_kukutool_enabled():
             return {}
         resolver = next(
             (item for item in self.share_resolver.resolvers if isinstance(item, KukutoolResolver)),
@@ -286,31 +285,85 @@ class AppRuntime:
         if self._is_bilibili_share_text(raw_text):
             return self._parse_bilibili_share_text(raw_text)
         share_url = self.adapter.extract_share_url(raw_text)
-        resolution = self.share_resolver.resolve(share_url)
-        metadata = self.adapter.parse_aweme_detail(
-            resolution.payload,
-            source_type=SourceType.SHARE_LINK,
-            page_url=resolution.canonical_url,
-        )
-        variants = self._tag_variants(
-            self.adapter.parse_share_variants(resolution.payload),
-            resolution.provider_id,
-        )
+        return self._parse_douyin_share_text(share_url)
+
+    def _parse_douyin_share_text(self, share_url: str) -> ShareParseResult:
+        metadata: VideoMetadata | None = None
+        canonical_url = share_url
+        provider_labels: list[str] = []
+        variants: list[VideoVariant] = []
+        resolver_errors: list[Exception] = []
+        native_resolution = None
+
+        if self._requires_native_douyin_detail():
+            try:
+                native_resolution = self._resolve_provider("native", share_url, attempts=1)
+                canonical_url = native_resolution.canonical_url
+                metadata = self.adapter.parse_aweme_detail(
+                    native_resolution.payload,
+                    source_type=SourceType.SHARE_LINK,
+                    page_url=canonical_url,
+                )
+                if "native" in self.resolver_sources:
+                    variants.extend(
+                        self._tag_variants(
+                            self.adapter.parse_share_variants(native_resolution.payload),
+                            "native",
+                        )
+                    )
+                    provider_labels.append("native")
+            except Exception as exc:
+                resolver_errors.append(exc)
+                if "native" in self.resolver_sources:
+                    provider_labels.append("native(失败)")
+
+        if "cdn" in self.resolver_sources:
+            try:
+                if native_resolution is None:
+                    raise RuntimeError("CDN 解析需要可用的抖音原生详情")
+                variants.extend(
+                    self._tag_variants(
+                        self._cdn_resolver().resolve_variants_from_payload(native_resolution.payload),
+                        "cdn",
+                    )
+                )
+                provider_labels.append("cdn")
+            except Exception as exc:
+                resolver_errors.append(exc)
+                provider_labels.append("cdn(失败)")
+
+        if self._is_kukutool_enabled():
+            try:
+                kukutool_resolution = self._resolve_provider(
+                    "kukutool", share_url, attempts=1, variants_only=True
+                )
+                if metadata is None:
+                    canonical_url = kukutool_resolution.canonical_url
+                    metadata = self.adapter.parse_aweme_detail(
+                        kukutool_resolution.payload,
+                        source_type=SourceType.SHARE_LINK,
+                        page_url=canonical_url,
+                    )
+                kukutool_video = (kukutool_resolution.payload.get("aweme_detail") or {}).get("video") or {}
+                variants.extend(
+                    self._tag_variants(self.adapter._build_kukutool_variants(kukutool_video), "kukutool")
+                )
+                provider_labels.append("kukutool")
+            except Exception as exc:
+                resolver_errors.append(exc)
+                provider_labels.append("kukutool(失败)")
+
+        if metadata is None:
+            self._raise_douyin_resolution_error(resolver_errors)
+        variants = self._merge_sync_variants(variants)
         if not variants:
-            raise RuntimeError("未解析到可下载版本")
-        variants = [
-            replace(
-                variant,
-                file_size=variant.file_size or self.public_session.probe_content_length(variant.download_url),
-            )
-            if not self._is_image_variant(variant)
-            else variant
-            for variant in variants
-        ]
+            self._raise_douyin_resolution_error(resolver_errors, fallback="未解析到可下载版本")
+        variants = self._merge_sync_variants(self._probe_missing_variant_sizes(variants))
+        variants = self._mark_recommended_variant(variants)
         return ShareParseResult(
-            provider_id=resolution.provider_id,
+            provider_id=" + ".join(provider_labels),
             source_url=share_url,
-            canonical_url=resolution.canonical_url,
+            canonical_url=canonical_url,
             metadata=metadata,
             variants=variants,
         )
@@ -668,19 +721,66 @@ class AppRuntime:
         provider_labels: list[str] = []
         merged_variants: list[VideoVariant] = []
         resolver_errors: list[Exception] = []
+        native_detail_payload: dict | None = None
 
-        if "kukutool" in self.resolver_sources and self.settings.share_resolvers.enable_kukutool_fallback:
+        if self._requires_native_douyin_detail():
+            try:
+                native_detail_payload = self.browser_session.fetch_douyin_aweme_detail(page_url)
+                native_metadata = self.adapter.parse_aweme_detail(
+                    native_detail_payload,
+                    source_type=source_type,
+                    page_url=page_url,
+                )
+                metadata = native_metadata
+                if "native" in self.resolver_sources:
+                    merged_variants.extend(
+                        self._tag_variants(self.adapter.parse_share_variants(native_detail_payload), "native")
+                    )
+                    provider_labels.append("native")
+            except Exception as exc:
+                resolver_errors.append(exc)
+                if "native" in self.resolver_sources:
+                    provider_labels.append("native(失败)")
+                if metadata is None:
+                    try:
+                        metadata = self.downloader.probe_metadata(
+                            url=page_url,
+                            platform="douyin",
+                            source_type=source_type,
+                            cookies_from_browser="chrome",
+                            cookies_file=cookies_path,
+                        )
+                    except Exception as fallback_exc:
+                        resolver_errors.append(fallback_exc)
+
+        if "cdn" in self.resolver_sources:
+            try:
+                if native_detail_payload is None:
+                    raise RuntimeError("CDN 解析需要可用的抖音原生详情")
+                merged_variants.extend(
+                    self._tag_variants(
+                        self._cdn_resolver().resolve_variants_from_payload(native_detail_payload),
+                        "cdn",
+                    )
+                )
+                provider_labels.append("cdn")
+            except Exception as exc:
+                resolver_errors.append(exc)
+                provider_labels.append("cdn(失败)")
+
+        if self._is_kukutool_enabled():
             try:
                 if isinstance(kukutool_resolution, Exception):
                     raise kukutool_resolution
                 resolution = kukutool_resolution or self._resolve_provider(
                     "kukutool", page_url, attempts=1, variants_only=True
                 )
-                metadata = self.adapter.parse_aweme_detail(
-                    resolution.payload,
-                    source_type=source_type,
-                    page_url=resolution.canonical_url,
-                )
+                if metadata is None:
+                    metadata = self.adapter.parse_aweme_detail(
+                        resolution.payload,
+                        source_type=source_type,
+                        page_url=resolution.canonical_url,
+                    )
                 kukutool_video = (resolution.payload.get("aweme_detail") or {}).get("video") or {}
                 kukutool_variants = self._limit_kukutool_preview_variants(
                     self.adapter._build_kukutool_variants(kukutool_video),
@@ -691,50 +791,12 @@ class AppRuntime:
             except Exception as exc:
                 resolver_errors.append(exc)
                 provider_labels.append("kukutool(失败)")
-
-        if "native" in self.resolver_sources:
-            try:
-                detail_payload = self.browser_session.fetch_douyin_aweme_detail(page_url)
-                native_metadata = self.adapter.parse_aweme_detail(
-                    detail_payload,
-                    source_type=source_type,
-                    page_url=page_url,
-                )
-                metadata = native_metadata
-                # Keep every original format for the preview. Synchronization
-                # still prefers Kuku's largest downloadable link.
-                merged_variants.extend(self._tag_variants(self.adapter.parse_share_variants(detail_payload), "native"))
-                if "native" not in provider_labels:
-                    provider_labels.append("native")
-            except Exception:
-                if metadata is None:
-                    metadata = self.downloader.probe_metadata(
-                        url=page_url,
-                        platform="douyin",
-                        source_type=source_type,
-                        cookies_from_browser="chrome",
-                        cookies_file=cookies_path,
-                    )
-                    provider_labels.append("native")
         if metadata is None:
-            if resolver_errors:
-                raise RuntimeError(
-                    "已选解析来源未返回可用结果: " + "; ".join(str(error) for error in resolver_errors)
-                ) from resolver_errors[-1]
-            raise RuntimeError("已选解析来源未返回可用结果")
+            self._raise_douyin_resolution_error(resolver_errors)
 
         metadata = self._apply_douyin_card_hint(metadata, page_url)
         merged_variants = self._merge_sync_variants(merged_variants)
-        kukutool_videos = [
-            variant
-            for variant in merged_variants
-            if variant.provider_id == "kukutool" and not self._is_image_variant(variant)
-        ]
-        selected_variant = (
-            max(kukutool_videos, key=lambda item: item.file_size or 0)
-            if kukutool_videos
-            else self._select_sync_variant(merged_variants)
-        )
+        selected_variant = self._select_sync_variant(merged_variants)
         if selected_variant is not None:
             metadata = replace(metadata, download_url=selected_variant.download_url)
         provider_summary = " + ".join(provider_labels) if provider_labels else "native"
@@ -778,6 +840,57 @@ class AppRuntime:
         assert last_error is not None
         raise last_error
 
+    def _is_kukutool_enabled(self) -> bool:
+        return "kukutool" in self.resolver_sources and self.settings.share_resolvers.enable_kukutool_fallback
+
+    def _requires_native_douyin_detail(self) -> bool:
+        return "native" in self.resolver_sources or "cdn" in self.resolver_sources
+
+    def _cdn_resolver(self) -> CdnDouyinResolver:
+        resolver = next(
+            (
+                item
+                for item in self.share_resolver.resolvers
+                if isinstance(item, CdnDouyinResolver)
+            ),
+            None,
+        )
+        if resolver is None:
+            raise RuntimeError("未启用解析来源: cdn")
+        return resolver
+
+    @staticmethod
+    def _raise_douyin_resolution_error(
+        resolver_errors: list[Exception],
+        *,
+        fallback: str = "已选解析来源未返回可用结果",
+    ) -> None:
+        if resolver_errors:
+            raise RuntimeError(
+                "已选解析来源未返回可用结果: " + "; ".join(str(error) for error in resolver_errors)
+            ) from resolver_errors[-1]
+        raise RuntimeError(fallback)
+
+    def _probe_missing_variant_sizes(self, variants: list[VideoVariant]) -> list[VideoVariant]:
+        return [
+            replace(
+                variant,
+                file_size=variant.file_size or self.public_session.probe_content_length(variant.download_url),
+            )
+            if not self._is_image_variant(variant)
+            else variant
+            for variant in variants
+        ]
+
+    def _mark_recommended_variant(self, variants: list[VideoVariant]) -> list[VideoVariant]:
+        selected = self._select_sync_variant(variants)
+        if selected is None:
+            return variants
+        return [
+            replace(variant, is_recommended=(variant.variant_id == selected.variant_id and variant.provider_id == selected.provider_id))
+            for variant in variants
+        ]
+
     def _build_share_resolver_chain(self) -> ResolverChain:
         resolvers: list[object] = []
         if "kukutool" in self.resolver_sources and self.settings.share_resolvers.enable_kukutool_fallback:
@@ -790,7 +903,7 @@ class AppRuntime:
                     ),
                 )
             )
-        if "native" in self.resolver_sources:
+        if self._requires_native_douyin_detail():
             resolvers.append(
                 NativeDouyinResolver(
                     settings=self.settings,
@@ -798,6 +911,8 @@ class AppRuntime:
                     public_session=self.public_session,
                 )
             )
+        if "cdn" in self.resolver_sources:
+            resolvers.append(CdnDouyinResolver(settings=self.settings))
         return ResolverChain(resolvers)
 
     def _safe_file_size(self, local_path: str) -> int | None:
@@ -848,9 +963,10 @@ class AppRuntime:
         merged = list(deduped.values())
         merged.sort(
             key=lambda item: (
-                self.adapter._quality_rank(item.quality_label),
-                item.bit_rate or 0,
+                item.file_size is not None,
                 item.file_size or 0,
+                item.bit_rate or 0,
+                self.adapter._quality_rank(item.quality_label),
             ),
             reverse=True,
         )

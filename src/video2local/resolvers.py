@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 import hashlib
+from urllib.request import Request, urlopen
 
 from video2local.browser import DouyinPublicSession, DouyinSignedSession, KukutoolSession
 from video2local.config import AppSettings
+from video2local.domain import VideoVariant
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,73 @@ class NativeDouyinResolver:
             if signed_error is not None:
                 raise signed_error
             raise
+
+
+@dataclass
+class CdnDouyinResolver:
+    """Resolve Douyin's original-quality CDN stream from native video metadata."""
+
+    settings: AppSettings
+    provider_id: str = "cdn"
+
+    def resolve_variants_from_payload(self, payload: dict) -> list[VideoVariant]:
+        detail = payload.get("aweme_detail") or {}
+        video = detail.get("video") or {}
+        play_addr = video.get("play_addr") or {}
+        video_uri = play_addr.get("uri")
+        if not video_uri or str(video_uri).startswith("http"):
+            raise RuntimeError("抖音详情中未找到 CDN 原始视频 URI")
+
+        play_url = (
+            "https://aweme.snssdk.com/aweme/v1/play/"
+            f"?video_id={video_uri}&ratio=default&line=0"
+        )
+        request = Request(
+            play_url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
+                    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 "
+                    "Mobile/15E148 Safari/604.1"
+                ),
+                "Referer": "https://www.douyin.com/",
+            },
+            method="HEAD",
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                file_size = self._parse_file_size(response.headers.get("Content-Length"))
+                download_url = response.geturl()
+        except Exception as exc:
+            raise RuntimeError(f"CDN 原始高码率探测失败: {exc}") from exc
+
+        if not download_url or "douyinvod.com" not in download_url:
+            raise RuntimeError("CDN 原始高码率探测未返回 douyinvod.com 下载地址")
+        if file_size is None:
+            raise RuntimeError("CDN 原始高码率探测未返回文件大小")
+        return [
+            VideoVariant(
+                variant_id="cdn_default",
+                quality_label="原始高码率",
+                codec_label="unknown",
+                bit_rate=None,
+                file_size=file_size,
+                width=None,
+                height=None,
+                download_url=download_url,
+                provider_id=self.provider_id,
+            )
+        ]
+
+    @staticmethod
+    def _parse_file_size(value: str | None) -> int | None:
+        if value is None:
+            return None
+        try:
+            size = int(value)
+        except ValueError:
+            return None
+        return size if size > 0 else None
 
 
 @dataclass

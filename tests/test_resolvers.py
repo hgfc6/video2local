@@ -4,7 +4,8 @@ from unittest.mock import patch
 
 from video2local.browser import DouyinPublicSession, DouyinSignedSession, KukutoolSession
 from video2local.config import AppSettings
-from video2local.resolvers import KukutoolResolver, NativeDouyinResolver, ResolverChain, SharePayloadResolution
+from video2local.domain import VideoVariant
+from video2local.resolvers import CdnDouyinResolver, KukutoolResolver, NativeDouyinResolver, ResolverChain, SharePayloadResolution
 
 
 @dataclass
@@ -111,6 +112,50 @@ def test_native_douyin_resolver_falls_back_to_public_after_signed_retries(tmp_pa
     public_fetch_mock.assert_called_once()
     assert result.provider_id == "native"
     assert result.payload == public_payload
+
+
+def test_cdn_douyin_resolver_uses_default_ratio_and_records_redirected_url(tmp_path: Path) -> None:
+    resolver = CdnDouyinResolver(settings=AppSettings.default_for_root(tmp_path))
+    payload = {
+        "aweme_detail": {
+            "video": {
+                "play_addr": {"uri": "v0300fg10000example"},
+            }
+        }
+    }
+
+    class FakeResponse:
+        headers = {"Content-Length": "54704459"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def geturl(self) -> str:
+            return "https://v99-coldx.douyinvod.com/path/video.mp4"
+
+    with patch("video2local.resolvers.urlopen", return_value=FakeResponse()) as open_mock:
+        variants = resolver.resolve_variants_from_payload(payload)
+
+    request = open_mock.call_args.args[0]
+    assert request.get_method() == "HEAD"
+    assert "video_id=v0300fg10000example" in request.full_url
+    assert "ratio=default" in request.full_url
+    assert variants == [
+        VideoVariant(
+            variant_id="cdn_default",
+            quality_label="原始高码率",
+            codec_label="unknown",
+            bit_rate=None,
+            file_size=54704459,
+            width=None,
+            height=None,
+            download_url="https://v99-coldx.douyinvod.com/path/video.mp4",
+            provider_id="cdn",
+        )
+    ]
 
 
 def test_kukutool_resolver_returns_variants_without_opening_a_native_metadata_page(tmp_path: Path) -> None:

@@ -8,7 +8,7 @@ from video2local.app_runtime import AppRuntime
 from video2local.domain import ShareParseResult, SourceType, SyncProgress, VideoMetadata, VideoVariant
 from video2local.browser import ChromeLaunchSpec
 from video2local.config import AppSettings, ShareResolverSettings
-from video2local.resolvers import KukutoolResolver, NativeDouyinResolver
+from video2local.resolvers import CdnDouyinResolver, KukutoolResolver, NativeDouyinResolver
 from video2local.sync_engine import SyncSummary
 
 
@@ -283,7 +283,7 @@ def test_runtime_can_switch_to_kukutool_only_at_runtime(tmp_path: Path) -> None:
     assert [type(item) for item in runtime.share_resolver.resolvers] == [KukutoolResolver]
 
 
-def test_parse_share_text_prefers_kukutool_variants_when_enabled(tmp_path: Path) -> None:
+def test_parse_share_text_merges_native_and_kukutool_variants_when_enabled(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     settings = AppSettings(
         platform_name=settings.platform_name,
@@ -341,13 +341,84 @@ def test_parse_share_text_prefers_kukutool_variants_when_enabled(tmp_path: Path)
             result = runtime.parse_share_text("https://v.douyin.com/5MF6Y_tP8nk/")
 
     kukutool_parse_mock.assert_called_once()
-    signed_fetch_mock.assert_not_called()
+    signed_fetch_mock.assert_called_once()
     assert result.metadata.video_id
-    assert result.provider_id == "kukutool"
+    assert result.provider_id == "native + kukutool"
     assert result.variants[0].quality_label == "超高清"
     assert result.variants[0].provider_id == "kukutool"
     assert result.variants[0].file_size == 67819321
     assert result.variants[0].download_url == "https://cdn.example.com/ultra.mp4"
+    assert {variant.provider_id for variant in result.variants} == {"native", "kukutool"}
+
+
+def test_parse_share_text_merges_selected_sources_by_file_size(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    settings = AppSettings(
+        platform_name=settings.platform_name,
+        supported_source_types=settings.supported_source_types,
+        paths=settings.paths,
+        share_resolvers=ShareResolverSettings(
+            enable_kukutool_fallback=True,
+            enabled_sources=("native", "kukutool", "cdn"),
+        ),
+    )
+    runtime = AppRuntime(settings=settings)
+    native_payload = {
+        "aweme_detail": {
+            "aweme_id": "7651428709099242127",
+            "desc": "分享视频",
+            "author": {"nickname": "香菜严选"},
+            "video": {
+                "play_addr": {"uri": "v0300fg10000example"},
+                "bit_rate": [
+                    {
+                        "gear_name": "1080_1_1",
+                        "bit_rate": 3609000,
+                        "is_h265": 0,
+                        "play_addr": {
+                            "data_size": 3640000,
+                            "width": 1080,
+                            "height": 1920,
+                            "url_list": ["https://native.example.com/1080.mp4"],
+                        },
+                    }
+                ],
+            },
+        }
+    }
+    kukutool_payload = {
+        "videos": [
+            {
+                "video_fullinfo": [
+                    {"type": "超高清", "size": 64700000, "url": "https://kuku.example.com/ultra.mp4"},
+                ]
+            }
+        ]
+    }
+    cdn_variant = VideoVariant(
+        "cdn_default",
+        "原始高码率",
+        "unknown",
+        None,
+        54704459,
+        None,
+        None,
+        "https://v99-coldx.douyinvod.com/original.mp4",
+        provider_id="cdn",
+    )
+
+    with patch(
+        "video2local.app_runtime.DouyinSignedSession.fetch_share_aweme_detail",
+        return_value=("https://www.douyin.com/video/7651428709099242127", native_payload),
+    ):
+        with patch("video2local.app_runtime.KukutoolSession.parse_share_url", return_value=kukutool_payload):
+            with patch.object(CdnDouyinResolver, "resolve_variants_from_payload", return_value=[cdn_variant]):
+                result = runtime.parse_share_text("https://v.douyin.com/5MF6Y_tP8nk/")
+
+    assert result.provider_id == "native + cdn + kukutool"
+    assert [variant.file_size for variant in result.variants] == [64700000, 54704459, 3640000]
+    assert [variant.provider_id for variant in result.variants] == ["kukutool", "cdn", "native"]
+    assert result.variants[0].is_recommended is True
 
 
 def test_start_sync_detects_supported_douyin_source(tmp_path: Path) -> None:
@@ -788,7 +859,7 @@ def test_preview_sync_returns_merged_variant_summary(tmp_path: Path) -> None:
 
     assert preview.source.platform == "douyin"
     assert len(preview.items) == 2
-    assert preview.items[0].provider_summary == "kukutool + native"
+    assert preview.items[0].provider_summary == "native + kukutool"
     assert "超高清" in preview.items[0].variant_summary
     assert "2160p" in preview.items[0].variant_summary
     assert preview.items[0].selected_quality_label == "超高清"

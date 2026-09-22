@@ -179,6 +179,8 @@ class MainWindow(QMainWindow):
         self.native_resolver_checkbox.setChecked("native" in self.controller.resolver_sources)
         self.kukutool_resolver_checkbox = QCheckBox("Kukutool")
         self.kukutool_resolver_checkbox.setChecked("kukutool" in self.controller.resolver_sources)
+        self.cdn_resolver_checkbox = QCheckBox("CDN 解析（原始高码率）")
+        self.cdn_resolver_checkbox.setChecked("cdn" in self.controller.resolver_sources)
         self.share_input = QLineEdit()
         self.share_input.setPlaceholderText("粘贴抖音或哔哩哔哩分享文案、短链或视频链接")
         self.parse_share_button = QPushButton("解析分享链接")
@@ -271,6 +273,7 @@ class MainWindow(QMainWindow):
         resolver_row.setSpacing(12)
         resolver_row.addWidget(self.native_resolver_checkbox)
         resolver_row.addWidget(self.kukutool_resolver_checkbox)
+        resolver_row.addWidget(self.cdn_resolver_checkbox)
         resolver_row.addStretch(1)
         self.resolver_widget = QWidget()
         self.resolver_widget.setLayout(resolver_row)
@@ -497,6 +500,8 @@ class MainWindow(QMainWindow):
                     resolver_sources.append("native")
                 if self.kukutool_resolver_checkbox.isChecked():
                     resolver_sources.append("kukutool")
+                if self.cdn_resolver_checkbox.isChecked():
+                    resolver_sources.append("cdn")
                 self.controller.set_resolver_sources(tuple(resolver_sources))
         except ValueError as exc:
             self.controller.status_text = f"错误: {exc}"
