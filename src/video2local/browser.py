@@ -40,6 +40,7 @@ KUKUTOOL_NOTICE_DISMISS_BUTTON_RE = re.compile(
     r"7天内不[在再]提示|Don't show again for 7 days", re.IGNORECASE
 )
 KUKUTOOL_NOTICE_CONTINUE_BUTTON_RE = re.compile(r"^(继续处理|Continue)$", re.IGNORECASE)
+KUKUTOOL_COOKIE_CONSENT_BUTTON_RE = re.compile(r"^(同意|Consent)$", re.IGNORECASE)
 
 
 async def evaluate_with_navigation_retry(page, expression: str, *, attempts: int = 4):
@@ -635,8 +636,8 @@ class KukutoolSession(DouyinPublicSession):
             entry["size"] = size
         return entry
 
-    @staticmethod
-    async def _click_more_sizes_button(page) -> bool:
+    async def _click_more_sizes_button(self, page) -> bool:
+        await self._dismiss_kukutool_anchor_ad(page)
         more_sizes = page.get_by_role("button", name=KUKUTOOL_MORE_SIZES_BUTTON_RE)
         if not await more_sizes.count():
             more_sizes = page.locator("button").filter(has_text=KUKUTOOL_MORE_SIZES_BUTTON_RE)
@@ -889,6 +890,9 @@ class KukutoolSession(DouyinPublicSession):
     async def _wait_for_quality_results(self, page, *, base_url: str, timeout_seconds: int = 120) -> None:
         for _ in range(timeout_seconds):
             await self._wait_for_kukutool_page(page, base_url=base_url)
+            if await self._dismiss_kukutool_ad_popup(page):
+                await page.wait_for_timeout(300)
+                continue
             try:
                 await wait_for_function_with_navigation_retry(
                     page,
@@ -970,6 +974,13 @@ class KukutoolSession(DouyinPublicSession):
             or re.search(r"验证码|人机验证|captcha|recaptcha|hcaptcha", page_text, re.IGNORECASE)
         ):
             return False
+        consent = page.get_by_role("button", name=KUKUTOOL_COOKIE_CONSENT_BUTTON_RE)
+        if await consent.count():
+            try:
+                await consent.first.click(timeout=1000)
+                return True
+            except PlaywrightError:
+                return False
         try:
             await page.keyboard.press("Escape")
         except PlaywrightError:
@@ -994,7 +1005,33 @@ class KukutoolSession(DouyinPublicSession):
                 return True
             except PlaywrightError:
                 return False
-        return False
+        return await self._dismiss_kukutool_anchor_ad(page)
+
+    @staticmethod
+    async def _dismiss_kukutool_anchor_ad(page) -> bool:
+        """Drag the visible Google anchor-ad handle down, as a user would."""
+        handle = page.locator("ins[data-anchor-shown='true'] .grippy-host")
+        if not await handle.count():
+            return False
+        box = await handle.first.bounding_box()
+        viewport_height = await evaluate_with_navigation_retry(page, "window.innerHeight")
+        if box is None or box["y"] >= float(viewport_height):
+            return False
+        center_x = box["x"] + box["width"] / 2
+        center_y = box["y"] + box["height"] / 2
+        try:
+            await page.mouse.move(center_x, center_y)
+            await page.mouse.down()
+            await page.mouse.move(center_x, float(viewport_height) + 100, steps=12)
+            await page.mouse.up()
+            await page.wait_for_timeout(300)
+            return True
+        except PlaywrightError:
+            try:
+                await page.mouse.up()
+            except PlaywrightError:
+                pass
+            return False
 
     async def _parse_share_url_async(self, share_url: str, *, base_url: str) -> dict:
         result = (await self._parse_share_urls_async([share_url], base_url=base_url))[0]

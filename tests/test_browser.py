@@ -9,6 +9,7 @@ from video2local.browser import (
     ChromeLaunchSpec,
     ChromeRemoteSession,
     DouyinSignedSession,
+    KUKUTOOL_COOKIE_CONSENT_BUTTON_RE,
     KUKUTOOL_NOTICE_DISMISS_BUTTON_RE,
     KukutoolSession,
     evaluate_with_navigation_retry,
@@ -150,6 +151,8 @@ def test_kukutool_result_wait_expression_matches_downloadable_quality_buttons() 
 def test_kukutool_more_sizes_controls_support_chinese_and_english_labels() -> None:
     assert KukutoolSession._parse_file_size("More sizes File size: 1 GB") == 1024 * 1024 * 1024
     assert KukutoolSession._is_more_sizes_dialog("More sizes\nFile size: 1 GB")
+    assert KUKUTOOL_COOKIE_CONSENT_BUTTON_RE.search("Consent")
+    assert KUKUTOOL_COOKIE_CONSENT_BUTTON_RE.search("同意")
 
 
 def test_kukutool_usage_notice_dismissal_waits_for_the_modal_to_close() -> None:
@@ -182,6 +185,18 @@ def test_kukutool_page_lookup_keeps_same_origin_vignette_for_gate_handling() -> 
     names = KukutoolSession._find_kukutool_page.__code__.co_names
 
     assert "_is_google_vignette" in names
+
+
+def test_kukutool_more_sizes_click_dismisses_visible_anchor_ad_first() -> None:
+    names = KukutoolSession._click_more_sizes_button.__code__.co_names
+
+    assert "_dismiss_kukutool_anchor_ad" in names
+
+
+def test_kukutool_quality_wait_rechecks_initial_page_popups() -> None:
+    names = KukutoolSession._wait_for_quality_results.__code__.co_names
+
+    assert "_dismiss_kukutool_ad_popup" in names
 
 
 def test_page_evaluate_retries_when_navigation_replaces_execution_context() -> None:
