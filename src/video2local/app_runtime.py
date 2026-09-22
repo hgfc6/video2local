@@ -629,7 +629,7 @@ class AppRuntime:
                 source_type=source.source_type,
                 source_url=page_url,
             )
-            selected_variant = variants[0] if variants else None
+            selected_variant = self._select_sync_variant(variants)
             if selected_variant is not None:
                 metadata = replace(metadata, format_selector=selected_variant.format_selector)
             return SyncPreviewItem(
@@ -809,7 +809,16 @@ class AppRuntime:
     def _select_sync_variant(self, variants: list[VideoVariant]) -> VideoVariant | None:
         if not variants:
             return None
-        return variants[0]
+        return max(
+            variants,
+            key=lambda item: (
+                item.file_size is not None,
+                item.file_size or 0,
+                item.bit_rate or 0,
+                item.height or 0,
+                item.width or 0,
+            ),
+        )
 
     @staticmethod
     def _is_image_variant(variant: VideoVariant) -> bool:
@@ -821,16 +830,10 @@ class AppRuntime:
         *,
         page_url: str | None = None,
     ) -> list[VideoVariant]:
-        """Download the largest Kuku video; only note posts retain image attachments."""
-        kukutool_variants = [variant for variant in variants if variant.provider_id == "kukutool"]
-        preferred_variants = kukutool_variants or variants
-        image_variants = [variant for variant in preferred_variants if self._is_image_variant(variant)]
-        video_variants = [variant for variant in preferred_variants if not self._is_image_variant(variant)]
-        selected_video = (
-            max(video_variants, key=lambda item: item.file_size or 0)
-            if kukutool_variants and video_variants
-            else self._select_sync_variant(video_variants)
-        )
+        """Download the largest parsed video; only note posts retain image attachments."""
+        image_variants = [variant for variant in variants if self._is_image_variant(variant)]
+        video_variants = [variant for variant in variants if not self._is_image_variant(variant)]
+        selected_video = self._select_sync_variant(video_variants)
         if page_url and "/video/" in page_url:
             return [selected_video] if selected_video is not None else []
         return ([selected_video] if selected_video is not None else []) + image_variants
@@ -870,7 +873,15 @@ class AppRuntime:
 
     def _build_variant_summary(self, variants: list[VideoVariant]) -> str:
         parts: list[str] = []
-        for variant in variants:
+        for variant in sorted(
+            variants,
+            key=lambda item: (
+                item.file_size is None,
+                -(item.file_size or 0),
+                item.quality_label,
+                item.variant_id,
+            ),
+        ):
             details = variant.quality_label
             if variant.file_size is not None:
                 details += f"({variant.file_size / 1024 / 1024:.2f} MB)"

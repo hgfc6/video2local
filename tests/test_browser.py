@@ -9,7 +9,9 @@ from video2local.browser import (
     ChromeLaunchSpec,
     ChromeRemoteSession,
     DouyinSignedSession,
+    KUKUTOOL_CAPTCHA_TEXT_RE,
     KUKUTOOL_COOKIE_CONSENT_BUTTON_RE,
+    KUKUTOOL_FILE_SIZE_LABEL_RE,
     KUKUTOOL_NOTICE_DISMISS_BUTTON_RE,
     KukutoolSession,
     evaluate_with_navigation_retry,
@@ -153,6 +155,8 @@ def test_kukutool_more_sizes_controls_support_chinese_and_english_labels() -> No
     assert KukutoolSession._is_more_sizes_dialog("More sizes\nFile size: 1 GB")
     assert KUKUTOOL_COOKIE_CONSENT_BUTTON_RE.search("Consent")
     assert KUKUTOOL_COOKIE_CONSENT_BUTTON_RE.search("同意")
+    assert KUKUTOOL_CAPTCHA_TEXT_RE.search("为什么需要验证码？")
+    assert KUKUTOOL_FILE_SIZE_LABEL_RE.search("File size")
 
 
 def test_kukutool_usage_notice_dismissal_waits_for_the_modal_to_close() -> None:
@@ -193,10 +197,22 @@ def test_kukutool_more_sizes_click_dismisses_visible_anchor_ad_first() -> None:
     assert "_dismiss_kukutool_anchor_ad" in names
 
 
+def test_kukutool_more_sizes_url_copy_closes_its_dialog() -> None:
+    names = KukutoolSession._read_more_sizes_entry.__code__.co_names
+
+    assert "_close_more_sizes_dialog" in names
+
+
 def test_kukutool_quality_wait_rechecks_initial_page_popups() -> None:
     names = KukutoolSession._wait_for_quality_results.__code__.co_names
 
     assert "_dismiss_kukutool_ad_popup" in names
+
+
+def test_kukutool_only_treats_captcha_as_blocking_inside_a_visible_dialog() -> None:
+    names = KukutoolSession._has_visible_kukutool_captcha.__code__.co_names
+
+    assert "is_visible" in names
 
 
 def test_page_evaluate_retries_when_navigation_replaces_execution_context() -> None:

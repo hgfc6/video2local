@@ -305,7 +305,15 @@ class MainController:
 
     def _apply_share_parse_result(self, result: object) -> None:
         metadata = getattr(result, "metadata")
-        variants = list(getattr(result, "variants"))
+        variants = sorted(
+            getattr(result, "variants"),
+            key=lambda variant: (
+                getattr(variant, "file_size", None) is None,
+                -(getattr(variant, "file_size", None) or 0),
+                getattr(variant, "quality_label", ""),
+                getattr(variant, "variant_id", ""),
+            ),
+        )
         provider_id = getattr(result, "provider_id", "-")
         with self._lock:
             self.share_parse_result = result

@@ -374,6 +374,25 @@ def test_main_controller_can_parse_share_link_and_store_variants() -> None:
     assert len(controller.share_variants) == 1
 
 
+def test_main_controller_sorts_share_variants_by_file_size_ascending() -> None:
+    class Variant:
+        def __init__(self, variant_id: str, file_size: int | None) -> None:
+            self.variant_id = variant_id
+            self.file_size = file_size
+            self.quality_label = variant_id
+
+    result = type("ParseResult", (), {
+        "provider_id": "kukutool",
+        "metadata": type("Metadata", (), {"author_name": "作者", "title": "标题", "video_id": "1"})(),
+        "variants": [Variant("large", 64_000_000), Variant("small", 2_000_000), Variant("unknown", None)],
+    })()
+    controller = MainController(engine=FakeEngine())
+
+    controller._apply_share_parse_result(result)
+
+    assert [variant.variant_id for variant in controller.share_variants] == ["large", "small", "unknown"]
+
+
 def test_main_controller_can_download_selected_share_variant() -> None:
     @dataclass
     class DownloadResult:

@@ -32,6 +32,7 @@ KUKUTOOL_FILE_SIZE_RE = re.compile(
     r"(?:文件大小|File size)\s*[:：]\s*(?P<size>[\d.]+)\s*(?P<unit>KB|MB|GB)",
     re.IGNORECASE,
 )
+KUKUTOOL_FILE_SIZE_LABEL_RE = re.compile(r"文件大小|File size", re.IGNORECASE)
 KUKUTOOL_PARSE_BUTTON_RE = re.compile(r"^(开始解析|Parse Video)$", re.IGNORECASE)
 KUKUTOOL_CLEAR_BUTTON_RE = re.compile(r"^(清除内容|Clear)$", re.IGNORECASE)
 KUKUTOOL_MORE_SIZES_BUTTON_RE = re.compile(r"^(更多大小|More sizes)$", re.IGNORECASE)
@@ -41,6 +42,7 @@ KUKUTOOL_NOTICE_DISMISS_BUTTON_RE = re.compile(
 )
 KUKUTOOL_NOTICE_CONTINUE_BUTTON_RE = re.compile(r"^(继续处理|Continue)$", re.IGNORECASE)
 KUKUTOOL_COOKIE_CONSENT_BUTTON_RE = re.compile(r"^(同意|Consent)$", re.IGNORECASE)
+KUKUTOOL_CAPTCHA_TEXT_RE = re.compile(r"验证码|人机验证|captcha|recaptcha|hcaptcha", re.IGNORECASE)
 
 
 async def evaluate_with_navigation_retry(page, expression: str, *, attempts: int = 4):
@@ -631,10 +633,27 @@ class KukutoolSession(DouyinPublicSession):
         download_url = await self._copy_download_url(page, copy_button.last, capture_enabled)
         if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
             return None
+        await self._close_more_sizes_dialog(page)
         entry = {"type": "更多大小", "url": download_url}
         if size is not None:
             entry["size"] = size
         return entry
+
+    @staticmethod
+    async def _close_more_sizes_dialog(page) -> None:
+        """Release the modal so the next work can reach its More sizes button."""
+        dialog = page.locator("div.fixed.inset-0").filter(has_text=KUKUTOOL_FILE_SIZE_LABEL_RE)
+        if not await dialog.count():
+            return
+        close = dialog.first.get_by_role("button", name=re.compile(r"^(关闭|Close)$", re.IGNORECASE))
+        if not await close.count():
+            return
+        try:
+            await close.click(timeout=5000)
+            await dialog.first.wait_for(state="hidden", timeout=5000)
+        except PlaywrightError:
+            # The copied URL is still valid; a later clear action can recover the page.
+            return
 
     async def _click_more_sizes_button(self, page) -> bool:
         await self._dismiss_kukutool_anchor_ad(page)
@@ -968,11 +987,9 @@ class KukutoolSession(DouyinPublicSession):
             except PlaywrightError:
                 return False
         page_text = str(await evaluate_with_navigation_retry(page, "document.body.innerText"))
-        if (
-            self._is_usage_notice(page_text)
-            or self._is_more_sizes_dialog(page_text)
-            or re.search(r"验证码|人机验证|captcha|recaptcha|hcaptcha", page_text, re.IGNORECASE)
-        ):
+        if self._is_usage_notice(page_text) or self._is_more_sizes_dialog(page_text):
+            return False
+        if await self._has_visible_kukutool_captcha(page):
             return False
         consent = page.get_by_role("button", name=KUKUTOOL_COOKIE_CONSENT_BUTTON_RE)
         if await consent.count():
@@ -1006,6 +1023,17 @@ class KukutoolSession(DouyinPublicSession):
             except PlaywrightError:
                 return False
         return await self._dismiss_kukutool_anchor_ad(page)
+
+    @staticmethod
+    async def _has_visible_kukutool_captcha(page) -> bool:
+        """Do not mistake Kukutool's FAQ text for an active verification dialog."""
+        dialog = page.locator(".fc-dialog-overlay, .fc-message-root").filter(
+            has_text=KUKUTOOL_CAPTCHA_TEXT_RE
+        )
+        for index in range(await dialog.count()):
+            if await dialog.nth(index).is_visible():
+                return True
+        return False
 
     @staticmethod
     async def _dismiss_kukutool_anchor_ad(page) -> bool:

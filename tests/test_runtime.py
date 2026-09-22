@@ -63,13 +63,13 @@ def test_sync_variant_selection_keeps_best_video_and_all_images(tmp_path: Path) 
     selected = runtime._select_sync_variants(variants)
 
     assert [item.download_url for item in selected] == [
-        "https://cdn.example.com/540.mp4",
+        "https://cdn.example.com/1080.mp4",
         "https://cdn.example.com/1.jpg",
         "https://cdn.example.com/2.jpg",
     ]
 
 
-def test_sync_uses_largest_kukutool_video_even_when_native_is_higher_quality(tmp_path: Path) -> None:
+def test_sync_uses_largest_video_across_enabled_sources(tmp_path: Path) -> None:
     runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
     variants = [
         VideoVariant("native", "2160p", "H.265", None, 99, None, None, "https://native.example.com/2160.mp4", provider_id="native"),
@@ -79,7 +79,7 @@ def test_sync_uses_largest_kukutool_video_even_when_native_is_higher_quality(tmp
 
     selected = runtime._select_sync_variants(variants)
 
-    assert [item.download_url for item in selected] == ["https://kuku.example.com/1080.mp4"]
+    assert [item.download_url for item in selected] == ["https://native.example.com/2160.mp4"]
 
 
 def test_video_post_sync_does_not_download_kukutool_image_attachments(tmp_path: Path) -> None:

@@ -207,7 +207,7 @@ def test_main_window_downloads_checked_share_variant(tmp_path) -> None:
     controller.parse_share_text("https://v.douyin.com/5MF6Y_tP8nk/")
     controller.wait_for_sync(timeout=1.0)
     window.refresh_labels()
-    window.results_table.item(1, 0).setCheckState(Qt.Checked)
+    window.results_table.item(0, 0).setCheckState(Qt.Checked)
     window.output_dir_input.setText(str(tmp_path))
 
     window.handle_download_share()
