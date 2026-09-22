@@ -69,6 +69,23 @@ def test_sync_variant_selection_keeps_best_video_and_all_images(tmp_path: Path) 
     ]
 
 
+def test_merge_sync_variants_keeps_every_image_and_animated_attachment(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    variants = [
+        VideoVariant("image-1", "无水印图片", "原图", None, None, None, None, "https://cdn.example.com/1.jpg", provider_id="native"),
+        VideoVariant("live-1", "无水印实况图", "原始动态视频", None, None, None, None, "https://cdn.example.com/1.mp4", provider_id="native"),
+        VideoVariant("gif-1", "无水印动图", "原图", None, None, None, None, "https://cdn.example.com/2.gif", provider_id="native"),
+    ]
+
+    merged = runtime._merge_sync_variants(variants)
+
+    assert [variant.download_url for variant in merged] == [
+        "https://cdn.example.com/1.jpg",
+        "https://cdn.example.com/1.mp4",
+        "https://cdn.example.com/2.gif",
+    ]
+
+
 def test_sync_uses_largest_video_across_enabled_sources(tmp_path: Path) -> None:
     runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
     variants = [
@@ -1376,6 +1393,69 @@ def test_parse_share_text_returns_metadata_and_variants_without_login(tmp_path: 
     assert len(result.variants) == 1
     assert result.variants[0].quality_label == "720p"
     assert result.variants[0].file_size == 2086404
+
+
+def test_parse_native_note_skips_kukutool_and_cdn(tmp_path: Path) -> None:
+    settings = AppSettings.for_root(
+        tmp_path,
+        platform_name="douyin",
+        supported_source_types=("favorites", "author_videos"),
+        share_resolvers=ShareResolverSettings(
+            enable_kukutool_fallback=True,
+            enabled_sources=("native", "kukutool", "cdn"),
+        ),
+    )
+    runtime = AppRuntime(settings=settings)
+    payload = {
+        "aweme_detail": {
+            "aweme_id": "7688148414848400015",
+            "desc": "雨林人像",
+            "author": {"nickname": "光影予夏"},
+            "images": [
+                {"url_list": ["https://p3.douyinpic.com/one.jpeg"]},
+                {"url_list": ["https://p3.douyinpic.com/two.jpeg"]},
+            ],
+        }
+    }
+
+    with patch(
+        "video2local.app_runtime.DouyinSignedSession.fetch_share_aweme_detail",
+        return_value=("https://www.douyin.com/note/7688148414848400015", payload),
+    ):
+        with patch("video2local.app_runtime.KukutoolSession.parse_share_url") as kukutool_parse_mock:
+            with patch("video2local.app_runtime.CdnDouyinResolver.resolve_variants_from_payload") as cdn_resolve_mock:
+                result = runtime.parse_share_text("https://v.douyin.com/BDADO9Feg5s/")
+
+    assert result.provider_id == "native"
+    assert [variant.download_url for variant in result.variants] == [
+        "https://p3.douyinpic.com/one.jpeg",
+        "https://p3.douyinpic.com/two.jpeg",
+    ]
+    kukutool_parse_mock.assert_not_called()
+    cdn_resolve_mock.assert_not_called()
+
+
+def test_kukutool_preview_ignores_native_note_candidates(tmp_path: Path) -> None:
+    settings = AppSettings.for_root(
+        tmp_path,
+        platform_name="douyin",
+        supported_source_types=("favorites", "author_videos"),
+        share_resolvers=ShareResolverSettings(
+            enable_kukutool_fallback=True,
+            enabled_sources=("native", "kukutool"),
+        ),
+    )
+    runtime = AppRuntime(settings=settings)
+    resolver = kukutool_resolver_for(runtime)
+    video_url = "https://www.douyin.com/video/7669461269296518386"
+
+    with patch.object(resolver, "resolve_variants_only_many", return_value={video_url: object()}) as resolve_mock:
+        result = runtime._resolve_kukutool_preview_candidates(
+            ["https://www.douyin.com/note/7688148414848400015", video_url]
+        )
+
+    assert list(result) == [video_url]
+    resolve_mock.assert_called_once_with([video_url])
 
 
 def test_parse_share_text_prefers_signed_web_api_variants_when_available(tmp_path: Path) -> None:

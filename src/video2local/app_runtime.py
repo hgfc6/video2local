@@ -229,7 +229,13 @@ class AppRuntime:
         )
         if resolver is None:
             return {}
-        return resolver.resolve_variants_only_many(candidate_urls)
+        # Native note metadata exposes the original image URLs directly. Avoid
+        # third-party image parsing here: its copy controls can create popup
+        # pages and return short-lived image URLs.
+        video_urls = [url for url in candidate_urls if "/note/" not in url]
+        if not video_urls:
+            return {}
+        return resolver.resolve_variants_only_many(video_urls)
 
     def stop_sync(self) -> None:
         self.sync_engine.request_stop()
@@ -294,6 +300,7 @@ class AppRuntime:
         variants: list[VideoVariant] = []
         resolver_errors: list[Exception] = []
         native_resolution = None
+        native_is_image_post = False
 
         if self._requires_native_douyin_detail():
             try:
@@ -304,10 +311,12 @@ class AppRuntime:
                     source_type=SourceType.SHARE_LINK,
                     page_url=canonical_url,
                 )
+                native_variants = self.adapter.parse_share_variants(native_resolution.payload)
+                native_is_image_post = self._contains_image_variants(native_variants)
                 if "native" in self.resolver_sources:
                     variants.extend(
                         self._tag_variants(
-                            self.adapter.parse_share_variants(native_resolution.payload),
+                            native_variants,
                             "native",
                         )
                     )
@@ -317,7 +326,7 @@ class AppRuntime:
                 if "native" in self.resolver_sources:
                     provider_labels.append("native(失败)")
 
-        if "cdn" in self.resolver_sources:
+        if "cdn" in self.resolver_sources and not native_is_image_post:
             try:
                 if native_resolution is None:
                     raise RuntimeError("CDN 解析需要可用的抖音原生详情")
@@ -332,7 +341,7 @@ class AppRuntime:
                 resolver_errors.append(exc)
                 provider_labels.append("cdn(失败)")
 
-        if self._is_kukutool_enabled():
+        if self._is_kukutool_enabled() and not native_is_image_post:
             try:
                 kukutool_resolution = self._resolve_provider(
                     "kukutool", share_url, attempts=1, variants_only=True
@@ -521,7 +530,7 @@ class AppRuntime:
                     seen_media_keys.add(media_key)
                     if self._is_image_variant(variant):
                         image_ordinal += 1
-                        media_type = "image" if "图片" in variant.quality_label else "live_photo"
+                        media_type = "live_photo" if "实况图" in variant.quality_label else "image"
                         metadata = replace(
                             metadata,
                             video_id=f"{metadata.video_id}-{image_ordinal:03d}",
@@ -722,6 +731,7 @@ class AppRuntime:
         merged_variants: list[VideoVariant] = []
         resolver_errors: list[Exception] = []
         native_detail_payload: dict | None = None
+        native_is_image_post = False
 
         if self._requires_native_douyin_detail():
             try:
@@ -732,9 +742,11 @@ class AppRuntime:
                     page_url=page_url,
                 )
                 metadata = native_metadata
+                native_variants = self.adapter.parse_share_variants(native_detail_payload)
+                native_is_image_post = self._contains_image_variants(native_variants)
                 if "native" in self.resolver_sources:
                     merged_variants.extend(
-                        self._tag_variants(self.adapter.parse_share_variants(native_detail_payload), "native")
+                        self._tag_variants(native_variants, "native")
                     )
                     provider_labels.append("native")
             except Exception as exc:
@@ -753,7 +765,7 @@ class AppRuntime:
                     except Exception as fallback_exc:
                         resolver_errors.append(fallback_exc)
 
-        if "cdn" in self.resolver_sources:
+        if "cdn" in self.resolver_sources and not native_is_image_post:
             try:
                 if native_detail_payload is None:
                     raise RuntimeError("CDN 解析需要可用的抖音原生详情")
@@ -768,7 +780,7 @@ class AppRuntime:
                 resolver_errors.append(exc)
                 provider_labels.append("cdn(失败)")
 
-        if self._is_kukutool_enabled():
+        if self._is_kukutool_enabled() and not native_is_image_post:
             try:
                 if isinstance(kukutool_resolution, Exception):
                     raise kukutool_resolution
@@ -937,7 +949,10 @@ class AppRuntime:
 
     @staticmethod
     def _is_image_variant(variant: VideoVariant) -> bool:
-        return "图片" in variant.quality_label or "实况图" in variant.quality_label
+        return any(marker in variant.quality_label for marker in ("图片", "动图", "实况图"))
+
+    def _contains_image_variants(self, variants: list[VideoVariant]) -> bool:
+        return bool(variants) and all(self._is_image_variant(variant) for variant in variants)
 
     def _select_sync_variants(
         self,
@@ -954,8 +969,15 @@ class AppRuntime:
         return ([selected_video] if selected_video is not None else []) + image_variants
 
     def _merge_sync_variants(self, variants: list[VideoVariant]) -> list[VideoVariant]:
+        attachments: list[VideoVariant] = []
+        attachment_urls: set[str] = set()
         deduped: dict[tuple[str, str], VideoVariant] = {}
         for variant in variants:
+            if self._is_image_variant(variant):
+                if variant.download_url not in attachment_urls:
+                    attachment_urls.add(variant.download_url)
+                    attachments.append(variant)
+                continue
             key = (variant.provider_id or "native", variant.quality_label)
             existing = deduped.get(key)
             if existing is None or self.adapter._variant_priority(variant) > self.adapter._variant_priority(existing):
@@ -970,7 +992,7 @@ class AppRuntime:
             ),
             reverse=True,
         )
-        return merged
+        return merged + attachments
 
     def _limit_kukutool_preview_variants(
         self,

@@ -86,6 +86,11 @@ class DouyinAdapter:
         duration_seconds = None
         if isinstance(duration_ms, int):
             duration_seconds = duration_ms // 1000
+        download_url = self._select_best_media_url(video, required=False)
+        if download_url is None:
+            download_url = self._select_primary_image_url(detail)
+        if download_url is None:
+            raise RuntimeError("抖音作品详情中未找到可下载的媒体地址")
         return VideoMetadata(
             platform=self.platform_name,
             source_type=source_type,
@@ -93,13 +98,19 @@ class DouyinAdapter:
             title=title,
             author_name=author_name,
             page_url=page_url,
-            download_url=self._select_best_media_url(video),
+            download_url=download_url,
             duration_seconds=duration_seconds,
             author_handle=str(author_handle) if author_handle else None,
         )
 
     def parse_share_variants(self, payload: dict) -> list[VideoVariant]:
-        video = (payload.get("aweme_detail") or {}).get("video") or {}
+        detail = payload.get("aweme_detail") or {}
+        image_variants = self._build_image_variants(detail)
+        if image_variants:
+            image_variants[0] = VideoVariant(**{**image_variants[0].__dict__, "is_recommended": True})
+            return image_variants
+
+        video = detail.get("video") or {}
         variants: list[VideoVariant] = []
         variants.extend(self._build_kukutool_variants(video))
         variants.extend(self._build_public_download_variants(video))
@@ -161,7 +172,7 @@ class DouyinAdapter:
             )
         return variants
 
-    def _select_best_media_url(self, video: dict) -> str:
+    def _select_best_media_url(self, video: dict, *, required: bool = True) -> str | None:
         bit_rates = video.get("bit_rate") or []
         if bit_rates:
             best_variant = max(
@@ -177,7 +188,128 @@ class DouyinAdapter:
             if urls:
                 return urls[0]
 
-        raise RuntimeError("抖音视频详情中未找到可下载的视频地址")
+        if required:
+            raise RuntimeError("抖音视频详情中未找到可下载的视频地址")
+        return None
+
+    @classmethod
+    def _build_image_variants(cls, detail: dict) -> list[VideoVariant]:
+        """Return original image, animated-image, and Live Photo URLs from a note."""
+        candidates: list[object] = []
+        for field in ("images", "image_list", "no_watermark_image_list"):
+            value = detail.get(field)
+            if isinstance(value, list):
+                candidates.extend(value)
+        image_post_info = detail.get("image_post_info") or {}
+        if isinstance(image_post_info, dict):
+            for field in ("images", "image_list"):
+                value = image_post_info.get(field)
+                if isinstance(value, list):
+                    candidates.extend(value)
+
+        variants: list[VideoVariant] = []
+        seen_urls: set[str] = set()
+        label_counts: dict[str, int] = {}
+        for item in candidates:
+            media_urls: list[tuple[str, str]] = []
+            static_url = cls._image_url(item)
+            if static_url is not None:
+                media_urls.append(("无水印动图" if cls._is_animated_image_url(static_url) else "无水印图片", static_url))
+            motion = cls._motion_url(item)
+            if motion is not None and motion[0] != static_url:
+                motion_url, is_animated = motion
+                motion_label = "无水印动图" if is_animated else "无水印实况图"
+                media_urls.append((motion_label, motion_url))
+            for base_label, url in media_urls:
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                label_counts[base_label] = label_counts.get(base_label, 0) + 1
+                label_ordinal = label_counts[base_label]
+                label = base_label if label_ordinal == 1 else f"{base_label} {label_ordinal}"
+                ordinal = len(variants) + 1
+                variants.append(
+                    VideoVariant(
+                        variant_id=f"native_image_{ordinal}",
+                        quality_label=label,
+                        codec_label="原图" if base_label != "无水印实况图" else "原始动态视频",
+                        bit_rate=None,
+                        file_size=None,
+                        width=None,
+                        height=None,
+                        download_url=url,
+                    )
+                )
+        return variants
+
+    @classmethod
+    def _select_primary_image_url(cls, detail: dict) -> str | None:
+        variants = cls._build_image_variants(detail)
+        return variants[0].download_url if variants else None
+
+    @staticmethod
+    def _image_url(item: object) -> str | None:
+        if isinstance(item, str):
+            return item if item.startswith(("http://", "https://")) else None
+        if not isinstance(item, dict):
+            return None
+        for field in ("url_list", "origin_url_list", "download_url_list"):
+            urls = item.get(field)
+            if isinstance(urls, list):
+                url = next((value for value in urls if isinstance(value, str) and value.startswith(("http://", "https://"))), None)
+                if url is not None:
+                    return url
+        for field in ("origin_image", "display_image", "image"):
+            nested_url = DouyinAdapter._image_url(item.get(field))
+            if nested_url is not None:
+                return nested_url
+        return None
+
+    @staticmethod
+    def _is_animated_image_url(url: str) -> bool:
+        lowered = url.lower()
+        return any(marker in lowered for marker in (".gif", ".webp", "format=gif", "format=webp", "animated"))
+
+    @classmethod
+    def _motion_url(cls, item: object) -> tuple[str, bool] | None:
+        if not isinstance(item, dict):
+            return None
+        for field in (
+            "animated_url_list",
+            "animated_url",
+            "gif_url_list",
+            "gif_url",
+            "live_url_list",
+            "live_url",
+            "motion_url_list",
+            "motion_url",
+        ):
+            url = cls._media_url(item.get(field))
+            if url is not None:
+                return url, True
+        video = item.get("video")
+        if not isinstance(video, dict):
+            return None
+        for field in ("play_addr_h264", "play_addr", "download_addr"):
+            url = cls._media_url(video.get(field))
+            if url is not None:
+                return url, False
+        url = cls._media_url(video)
+        return (url, False) if url is not None else None
+
+    @classmethod
+    def _media_url(cls, item: object) -> str | None:
+        if isinstance(item, str):
+            return item if item.startswith(("http://", "https://")) else None
+        if isinstance(item, list):
+            for value in item:
+                url = cls._media_url(value)
+                if url is not None:
+                    return url
+            return None
+        if not isinstance(item, dict):
+            return None
+        return cls._image_url(item)
 
     def _build_quality_label(self, *, width: int | None, height: int | None) -> str:
         short_edge = min(width, height) if width and height else (height or width)

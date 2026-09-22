@@ -276,3 +276,65 @@ def test_parse_share_variants_reads_kukutool_video_fullinfo_labels_and_sizes() -
     assert variants[0].download_url == "https://cdn.example.com/ultra.mp4"
     assert variants[0].file_size == 67819321
     assert variants[0].is_recommended is True
+
+
+def test_parse_note_detail_returns_all_native_image_urls_without_video_data() -> None:
+    adapter = DouyinAdapter()
+    payload = {
+        "aweme_detail": {
+            "aweme_id": "7688148414848400015",
+            "desc": "雨林人像",
+            "author": {"nickname": "光影予夏"},
+            "images": [
+                {"url_list": ["https://p3.douyinpic.com/one.jpeg"]},
+                {"origin_image": {"url_list": ["https://p3.douyinpic.com/two.jpeg"]}},
+            ],
+            "image_post_info": {
+                "images": [{"display_image": {"url_list": ["https://p3.douyinpic.com/one.jpeg"]}}]
+            },
+        }
+    }
+
+    metadata = adapter.parse_aweme_detail(
+        payload,
+        source_type=SourceType.SHARE_LINK,
+        page_url="https://www.douyin.com/note/7688148414848400015",
+    )
+    variants = adapter.parse_share_variants(payload)
+
+    assert metadata.download_url == "https://p3.douyinpic.com/one.jpeg"
+    assert [variant.quality_label for variant in variants] == ["无水印图片", "无水印图片 2"]
+    assert [variant.download_url for variant in variants] == [
+        "https://p3.douyinpic.com/one.jpeg",
+        "https://p3.douyinpic.com/two.jpeg",
+    ]
+    assert variants[0].is_recommended is True
+
+
+def test_parse_note_detail_keeps_animated_image_and_live_photo_media() -> None:
+    adapter = DouyinAdapter()
+    payload = {
+        "aweme_detail": {
+            "aweme_id": "7688148414848400016",
+            "images": [
+                {
+                    "url_list": ["https://p3.douyinpic.com/still.jpeg"],
+                    "video": {"play_addr": {"url_list": ["https://v3.douyinvod.com/live.mp4"]}},
+                },
+                {"animated_url_list": ["https://p3.douyinpic.com/animated.gif"]},
+            ],
+        }
+    }
+
+    variants = adapter.parse_share_variants(payload)
+
+    assert [variant.quality_label for variant in variants] == [
+        "无水印图片",
+        "无水印实况图",
+        "无水印动图",
+    ]
+    assert [variant.download_url for variant in variants] == [
+        "https://p3.douyinpic.com/still.jpeg",
+        "https://v3.douyinvod.com/live.mp4",
+        "https://p3.douyinpic.com/animated.gif",
+    ]
