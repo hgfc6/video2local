@@ -566,14 +566,19 @@ class KukutoolSession(DouyinPublicSession):
                     quality_label = self._next_media_label(variant, media_counts)
                     variant = {**variant, "type": quality_label}
                     copy_button_text = "复制" if "size" in variant else "复制无水印链接"
-                    copy_button = next(
-                        (
-                            quality_buttons.nth(next_index)
-                            for next_index in range(index + 1, len(button_texts))
-                            if button_texts[next_index] == copy_button_text
-                        ),
-                        None,
+                    copy_button = await self._find_copy_button_for_download(
+                        quality_buttons.nth(index),
+                        copy_button_text=copy_button_text,
                     )
+                    if copy_button is None:
+                        copy_button = next(
+                            (
+                                quality_buttons.nth(next_index)
+                                for next_index in range(index + 1, len(button_texts))
+                                if button_texts[next_index] == copy_button_text
+                            ),
+                            None,
+                        )
                     if copy_button is None:
                         continue
                     download_url = await self._copy_download_url(page, copy_button, capture_enabled)
@@ -598,6 +603,17 @@ class KukutoolSession(DouyinPublicSession):
             "url": best_video_url,
             "videos": [{"url": best_video_url, "video_fullinfo": entries}],
         }
+
+    @staticmethod
+    async def _find_copy_button_for_download(download_button, *, copy_button_text: str):
+        """Find the copy action in the same Kukutool media card as its download action."""
+        container = download_button
+        for _ in range(7):
+            container = container.locator("xpath=..")
+            copy_buttons = container.get_by_role("button", name=copy_button_text)
+            if await copy_buttons.count() == 1:
+                return copy_buttons.first
+        return None
 
     async def _read_more_sizes_entries(self, page, capture_enabled: bool) -> list[dict]:
         """Copy all video rows from the optional More sizes result dialog."""
@@ -728,13 +744,37 @@ class KukutoolSession(DouyinPublicSession):
 
     async def _copy_download_url(self, page, copy_button, capture_enabled: bool) -> str:
         capture_index = await self._clipboard_capture_length(page) if capture_enabled else 0
+        existing_pages = tuple(page.context.pages)
         await copy_button.click()
+        await self._close_copy_popups(page, existing_pages)
         download_url = await self._wait_for_captured_url(page, capture_index) if capture_enabled else ""
         if not download_url:
             download_url = await evaluate_with_navigation_retry(page, "navigator.clipboard.readText()")
         if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
             download_url = self._read_windows_clipboard()
         return str(download_url)
+
+    @staticmethod
+    async def _close_copy_popups(page, existing_pages: tuple) -> None:
+        """Close pages opened by a copy control while preserving the user's work tabs."""
+        existing_page_ids = {id(item) for item in existing_pages}
+        for _ in range(4):
+            popups_closed = False
+            for candidate in list(page.context.pages):
+                if candidate is page or id(candidate) in existing_page_ids:
+                    continue
+                try:
+                    if await candidate.opener() is not page:
+                        continue
+                    await candidate.close()
+                    popups_closed = True
+                except PlaywrightError:
+                    continue
+            if not popups_closed:
+                await page.wait_for_timeout(100)
+                continue
+            # A site can open a redirect page just after its first blank popup.
+            await page.wait_for_timeout(100)
 
     @staticmethod
     def _parse_quality_button_text(button_text: str) -> dict | None:

@@ -77,6 +77,71 @@ def test_kukutool_mixed_media_labels_keep_video_and_every_image() -> None:
     assert labels == ["无水印视频", "无水印图片", "无水印图片 2", "无水印图片 3"]
 
 
+def test_kukutool_pairs_image_copy_control_with_its_own_media_card() -> None:
+    class FakeCopyButtons:
+        def __init__(self, count: int, marker: str) -> None:
+            self._count = count
+            self.first = marker
+
+        async def count(self) -> int:
+            return self._count
+
+    class FakeContainer:
+        def __init__(self, parent, copy_count: int, marker: str) -> None:
+            self._parent = parent
+            self._copy_count = copy_count
+            self._marker = marker
+
+        def locator(self, selector: str):
+            assert selector == "xpath=.."
+            return self._parent
+
+        def get_by_role(self, role: str, name: str):
+            assert role == "button"
+            assert name == "复制无水印链接"
+            return FakeCopyButtons(self._copy_count, self._marker)
+
+    root = FakeContainer(None, 2, "root-copy")
+    card = FakeContainer(root, 1, "image-card-copy")
+    download_button = FakeContainer(card, 0, "download")
+
+    copy_button = asyncio.run(
+        KukutoolSession._find_copy_button_for_download(
+            download_button,
+            copy_button_text="复制无水印链接",
+        )
+    )
+
+    assert copy_button == "image-card-copy"
+
+
+def test_kukutool_closes_only_new_popups_opened_by_copy_action() -> None:
+    class FakePopup:
+        def __init__(self, opener) -> None:
+            self._opener = opener
+            self.closed = False
+
+        async def opener(self):
+            return self._opener
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FakePage:
+        async def wait_for_timeout(self, timeout: int) -> None:
+            return None
+
+    page = FakePage()
+    copy_popup = FakePopup(page)
+    user_tab = FakePopup(None)
+    page.context = type("FakeContext", (), {"pages": [page, user_tab, copy_popup]})()
+
+    asyncio.run(KukutoolSession._close_copy_popups(page, (page, user_tab)))
+
+    assert copy_popup.closed is True
+    assert user_tab.closed is False
+
+
 def test_kukutool_keeps_only_largest_video_but_all_image_entries() -> None:
     entries = KukutoolSession._keep_best_video_and_all_images(
         [
