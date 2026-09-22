@@ -11,7 +11,9 @@ from video2local.browser import (
     DouyinSignedSession,
     KUKUTOOL_CAPTCHA_TEXT_RE,
     KUKUTOOL_COOKIE_CONSENT_BUTTON_RE,
+    KUKUTOOL_COPY_LINK_BUTTON_RE,
     KUKUTOOL_FILE_SIZE_LABEL_RE,
+    KUKUTOOL_MORE_SIZES_BUTTON_RE,
     KUKUTOOL_NOTICE_DISMISS_BUTTON_RE,
     KukutoolSession,
     evaluate_with_navigation_retry,
@@ -95,6 +97,18 @@ def test_kukutool_keeps_only_largest_video_but_all_image_entries() -> None:
 def test_kukutool_more_sizes_file_size_parser_supports_chinese_and_english() -> None:
     assert KukutoolSession._parse_file_size("文件大小：156.05 MB") == int(156.05 * 1024 * 1024)
     assert KukutoolSession._parse_file_size("File size: 156.05 MB") == int(156.05 * 1024 * 1024)
+    assert KukutoolSession._parse_file_size("2160 × 3840\n52.17 MB") == int(52.17 * 1024 * 1024)
+
+
+def test_kukutool_more_sizes_row_parser_uses_resolution_and_row_size() -> None:
+    assert KukutoolSession._parse_more_sizes_row("2160 × 3840\n52.17 MB\n下载\n复制", index=0) == {
+        "type": "2160p",
+        "size": int(52.17 * 1024 * 1024),
+    }
+    assert KukutoolSession._parse_more_sizes_row("1080 × 1920\n2.00 MB\n下载\n复制", index=1) == {
+        "type": "1080p",
+        "size": 2 * 1024 * 1024,
+    }
 
 
 def test_kukutool_more_sizes_dialog_and_usage_notice_detection_are_bilingual() -> None:
@@ -103,6 +117,9 @@ def test_kukutool_more_sizes_dialog_and_usage_notice_detection_are_bilingual() -
     assert KUKUTOOL_NOTICE_DISMISS_BUTTON_RE.search("7天内不在提示")
     assert KukutoolSession._is_more_sizes_dialog("More sizes\nFile size: 156.05 MB")
     assert KukutoolSession._is_more_sizes_dialog("更多大小\n文件大小：156.05 MB")
+    assert KukutoolSession._is_more_sizes_dialog(
+        "更多大小\n分辨率 大小 操作\n2160 × 3840\n52.17 MB\n下载\n复制"
+    )
 
 
 def test_kukutool_standard_video_fallback_prefers_1080p_then_720p() -> None:
@@ -157,6 +174,10 @@ def test_kukutool_more_sizes_controls_support_chinese_and_english_labels() -> No
     assert KUKUTOOL_COOKIE_CONSENT_BUTTON_RE.search("同意")
     assert KUKUTOOL_CAPTCHA_TEXT_RE.search("为什么需要验证码？")
     assert KUKUTOOL_FILE_SIZE_LABEL_RE.search("File size")
+    assert KUKUTOOL_MORE_SIZES_BUTTON_RE.search("More sizes (HD)")
+    assert KUKUTOOL_COPY_LINK_BUTTON_RE.search("Copy URL")
+    assert KUKUTOOL_COPY_LINK_BUTTON_RE.search("复制下载链接")
+    assert KUKUTOOL_COPY_LINK_BUTTON_RE.search("复制")
 
 
 def test_kukutool_usage_notice_dismissal_waits_for_the_modal_to_close() -> None:
@@ -198,9 +219,16 @@ def test_kukutool_more_sizes_click_dismisses_visible_anchor_ad_first() -> None:
 
 
 def test_kukutool_more_sizes_url_copy_closes_its_dialog() -> None:
-    names = KukutoolSession._read_more_sizes_entry.__code__.co_names
+    names = KukutoolSession._read_more_sizes_entries.__code__.co_names
 
     assert "_close_more_sizes_dialog" in names
+
+
+def test_kukutool_more_sizes_dialog_lookup_uses_content_not_legacy_css_only() -> None:
+    names = KukutoolSession._find_more_sizes_dialog.__code__.co_consts
+
+    assert any("[role='dialog']" in value for value in names if isinstance(value, str))
+    assert any(".modal" in value for value in names if isinstance(value, str))
 
 
 def test_kukutool_quality_wait_rechecks_initial_page_popups() -> None:

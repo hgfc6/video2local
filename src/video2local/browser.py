@@ -33,12 +33,15 @@ KUKUTOOL_FILE_SIZE_RE = re.compile(
     re.IGNORECASE,
 )
 KUKUTOOL_FILE_SIZE_LABEL_RE = re.compile(r"文件大小|File size", re.IGNORECASE)
+KUKUTOOL_BARE_FILE_SIZE_RE = re.compile(r"(?P<size>[\d.]+)\s*(?P<unit>KB|MB|GB)", re.IGNORECASE)
+KUKUTOOL_RESOLUTION_RE = re.compile(r"(?P<width>\d{3,5})\s*[×xX]\s*(?P<height>\d{3,5})")
+KUKUTOOL_MORE_SIZES_DIALOG_TITLE_RE = re.compile(r"更多大小|More sizes", re.IGNORECASE)
 KUKUTOOL_PARSE_BUTTON_RE = re.compile(r"^(开始解析|Parse Video)$", re.IGNORECASE)
 KUKUTOOL_CLEAR_BUTTON_RE = re.compile(r"^(清除内容|Clear)$", re.IGNORECASE)
-KUKUTOOL_MORE_SIZES_BUTTON_RE = re.compile(r"^(更多大小|More sizes)$", re.IGNORECASE)
-KUKUTOOL_COPY_LINK_BUTTON_RE = re.compile(r"^(复制链接|Copy link)$", re.IGNORECASE)
+KUKUTOOL_MORE_SIZES_BUTTON_RE = re.compile(r"^(更多大小|More sizes)(?:\s*\(.+\))?$", re.IGNORECASE)
+KUKUTOOL_COPY_LINK_BUTTON_RE = re.compile(r"^(?:复制(?:下载)?链接|复制|Copy(?:\s+(?:link|URL))?)$", re.IGNORECASE)
 KUKUTOOL_NOTICE_DISMISS_BUTTON_RE = re.compile(
-    r"7天内不[在再]提示|Don't show again for 7 days", re.IGNORECASE
+    r"7天内不[在再]提示|Don't show again(?: for)? 7 days", re.IGNORECASE
 )
 KUKUTOOL_NOTICE_CONTINUE_BUTTON_RE = re.compile(r"^(继续处理|Continue)$", re.IGNORECASE)
 KUKUTOOL_COOKIE_CONSENT_BUTTON_RE = re.compile(r"^(同意|Consent)$", re.IGNORECASE)
@@ -545,12 +548,12 @@ class KukutoolSession(DouyinPublicSession):
         capture_enabled = await self._install_clipboard_capture(page)
         try:
             button_texts = [" ".join(text.split()) for text in await quality_buttons.all_text_contents()]
-            more_sizes_entry = await self._read_more_sizes_entry(page, capture_enabled)
-            if more_sizes_entry is not None:
-                # More sizes is the terminal result for video posts. Its modal
-                # covers the page's unrelated image controls, so do not inspect
-                # any lower-priority buttons after its URL was captured.
-                entries.append(more_sizes_entry)
+            more_sizes_entries = await self._read_more_sizes_entries(page, capture_enabled)
+            if more_sizes_entries:
+                # More sizes covers unrelated page controls. Its table already
+                # contains every available video version, so do not inspect
+                # lower-priority buttons behind the dialog.
+                entries.extend(more_sizes_entries)
             else:
                 fallback_video_index = self._select_standard_video_button(button_texts)
                 for index, button_text in enumerate(button_texts):
@@ -596,21 +599,21 @@ class KukutoolSession(DouyinPublicSession):
             "videos": [{"url": best_video_url, "video_fullinfo": entries}],
         }
 
-    async def _read_more_sizes_entry(self, page, capture_enabled: bool) -> dict | None:
-        """Copy the optional large-file URL without triggering browser download."""
+    async def _read_more_sizes_entries(self, page, capture_enabled: bool) -> list[dict]:
+        """Copy all video rows from the optional More sizes result dialog."""
         if not await self._click_more_sizes_button(page):
-            return None
+            return []
         dialog_text = await self._wait_for_more_sizes_dialog_or_notice(page)
         if self._is_usage_notice(dialog_text):
             if not await self._dismiss_usage_notice(page):
-                return None
+                return []
             await self._wait_for_usage_notice_to_clear(page)
             # The preference click starts the large-file request. The More sizes
             # button changes to "获取中…" for several seconds before the dialog appears.
             dialog_text = await self._wait_for_more_sizes_dialog_or_notice(page, timeout_seconds=45)
-            if not self._is_more_sizes_dialog(dialog_text):
+            if not await self._has_more_sizes_dialog(page):
                 if not await self._click_more_sizes_button(page):
-                    return None
+                    return []
                 dialog_text = await self._wait_for_more_sizes_dialog_or_notice(page, timeout_seconds=45)
             if self._is_usage_notice(dialog_text):
                 # The preference button can be delayed by a site animation. Continue is
@@ -620,40 +623,80 @@ class KukutoolSession(DouyinPublicSession):
                     await continue_button.first.click()
                     await self._wait_for_usage_notice_to_clear(page)
                     dialog_text = await self._wait_for_more_sizes_dialog_or_notice(page, timeout_seconds=45)
-                    if not self._is_more_sizes_dialog(dialog_text):
+                    if not await self._has_more_sizes_dialog(page):
                         if not await self._click_more_sizes_button(page):
-                            return None
+                            return []
                         dialog_text = await self._wait_for_more_sizes_dialog_or_notice(page, timeout_seconds=45)
-        if not self._is_more_sizes_dialog(dialog_text):
-            return None
-        size = self._parse_file_size(dialog_text)
-        copy_button = page.get_by_role("button", name=KUKUTOOL_COPY_LINK_BUTTON_RE)
+        dialog = await self._find_more_sizes_dialog(page)
+        if dialog is None:
+            return []
+        copy_button = dialog.get_by_role("button", name=KUKUTOOL_COPY_LINK_BUTTON_RE)
         if not await copy_button.count():
-            return None
-        download_url = await self._copy_download_url(page, copy_button.last, capture_enabled)
-        if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
-            return None
-        await self._close_more_sizes_dialog(page)
-        entry = {"type": "更多大小", "url": download_url}
-        if size is not None:
-            entry["size"] = size
-        return entry
+            copy_button = dialog.locator("button").filter(has_text=KUKUTOOL_COPY_LINK_BUTTON_RE)
+        if not await copy_button.count():
+            return []
+        entries: list[dict] = []
+        for index in range(await copy_button.count()):
+            current_copy_button = copy_button.nth(index)
+            row_text = await self._more_sizes_row_text(current_copy_button)
+            variant = self._parse_more_sizes_row(row_text, index=index)
+            download_url = await self._copy_download_url(page, current_copy_button, capture_enabled)
+            if not isinstance(download_url, str) or not download_url.startswith(("http://", "https://")):
+                continue
+            entries.append({**variant, "url": download_url})
+        await self._close_more_sizes_dialog(page, dialog)
+        return entries
 
     @staticmethod
-    async def _close_more_sizes_dialog(page) -> None:
+    async def _close_more_sizes_dialog(page, dialog=None) -> None:
         """Release the modal so the next work can reach its More sizes button."""
-        dialog = page.locator("div.fixed.inset-0").filter(has_text=KUKUTOOL_FILE_SIZE_LABEL_RE)
-        if not await dialog.count():
+        if dialog is None:
+            dialog = await KukutoolSession._find_more_sizes_dialog(page)
+        if dialog is None:
             return
-        close = dialog.first.get_by_role("button", name=re.compile(r"^(关闭|Close)$", re.IGNORECASE))
+        close = dialog.get_by_role("button", name=re.compile(r"^(关闭|Close)$", re.IGNORECASE))
+        if not await close.count():
+            close = dialog.locator("button").filter(has_text=re.compile(r"^(关闭|Close)$", re.IGNORECASE))
         if not await close.count():
             return
         try:
-            await close.click(timeout=5000)
-            await dialog.first.wait_for(state="hidden", timeout=5000)
+            await close.last.click(timeout=5000)
+            await dialog.wait_for(state="hidden", timeout=5000)
         except PlaywrightError:
             # The copied URL is still valid; a later clear action can recover the page.
             return
+
+    @staticmethod
+    async def _find_more_sizes_dialog(page):
+        """Find the visible result dialog by content, not a framework-specific class."""
+        dialogs = page.locator(
+            "[role='dialog'], [aria-modal='true'], div.fixed.inset-0, .modal, .dialog"
+        ).filter(has_text=KUKUTOOL_MORE_SIZES_DIALOG_TITLE_RE)
+        for index in range(await dialogs.count()):
+            dialog = dialogs.nth(index)
+            if await dialog.is_visible() and KukutoolSession._is_more_sizes_dialog(await dialog.inner_text()):
+                return dialog
+
+        # Kukutool has changed modal markup before. Start from the visible
+        # title, then walk up its ancestors so this remains independent of the
+        # current dialog framework and CSS class names.
+        titles = page.get_by_text(KUKUTOOL_MORE_SIZES_DIALOG_TITLE_RE, exact=True)
+        for index in range(await titles.count()):
+            node = titles.nth(index)
+            if not await node.is_visible():
+                continue
+            for _ in range(8):
+                node = node.locator("xpath=..")
+                try:
+                    text = await node.inner_text(timeout=1000)
+                except PlaywrightError:
+                    break
+                if KukutoolSession._is_more_sizes_dialog(text):
+                    return node
+        return None
+
+    async def _has_more_sizes_dialog(self, page) -> bool:
+        return await self._find_more_sizes_dialog(page) is not None
 
     async def _click_more_sizes_button(self, page) -> bool:
         await self._dismiss_kukutool_anchor_ad(page)
@@ -717,9 +760,45 @@ class KukutoolSession(DouyinPublicSession):
     def _parse_file_size(text: str) -> int | None:
         match = KUKUTOOL_FILE_SIZE_RE.search(text)
         if match is None:
+            match = KUKUTOOL_BARE_FILE_SIZE_RE.search(text)
+        if match is None:
             return None
         multiplier = {"KB": 1024, "MB": 1024 * 1024, "GB": 1024 * 1024 * 1024}
         return int(float(match.group("size")) * multiplier[match.group("unit").upper()])
+
+    @staticmethod
+    async def _more_sizes_row_text(copy_button) -> str:
+        """Read the smallest ancestor that identifies the copy button's video row."""
+        return str(
+            await copy_button.evaluate(
+                """button => {
+                    const resolution = /\\d{3,5}\\s*[×xX]\\s*\\d{3,5}/;
+                    const size = /\\d+(?:\\.\\d+)?\\s*(?:KB|MB|GB)/i;
+                    let node = button.parentElement;
+                    let fallback = '';
+                    while (node && node.parentElement) {
+                        const text = (node.innerText || '').trim();
+                        if (text && !fallback) fallback = text;
+                        if (resolution.test(text) && size.test(text)) return text;
+                        node = node.parentElement;
+                    }
+                    return fallback;
+                }"""
+            )
+        )
+
+    @classmethod
+    def _parse_more_sizes_row(cls, text: str, *, index: int) -> dict:
+        size = cls._parse_file_size(text)
+        resolution = KUKUTOOL_RESOLUTION_RE.search(text)
+        if resolution is None:
+            label = "更多大小" if index == 0 else f"更多大小 {index + 1}"
+        else:
+            label = f"{min(int(resolution.group('width')), int(resolution.group('height')))}p"
+        entry = {"type": label}
+        if size is not None:
+            entry["size"] = size
+        return entry
 
     @staticmethod
     def _next_media_label(variant: dict, media_counts: dict[str, int]) -> str:
@@ -965,7 +1044,7 @@ class KukutoolSession(DouyinPublicSession):
     async def _wait_for_more_sizes_dialog_or_notice(self, page, *, timeout_seconds: int = 20) -> str:
         for _ in range(timeout_seconds * 5):
             text = str(await evaluate_with_navigation_retry(page, "document.body.innerText"))
-            if self._is_usage_notice(text) or self._is_more_sizes_dialog(text):
+            if self._is_usage_notice(text) or await self._has_more_sizes_dialog(page):
                 return text
             await page.wait_for_timeout(200)
         return ""
@@ -976,7 +1055,12 @@ class KukutoolSession(DouyinPublicSession):
 
     @staticmethod
     def _is_more_sizes_dialog(text: str) -> bool:
-        return ("More sizes" in text or "更多大小" in text) and KUKUTOOL_FILE_SIZE_RE.search(text) is not None
+        if KUKUTOOL_MORE_SIZES_DIALOG_TITLE_RE.search(text) is None:
+            return False
+        return KUKUTOOL_FILE_SIZE_RE.search(text) is not None or (
+            KUKUTOOL_RESOLUTION_RE.search(text) is not None
+            and KUKUTOOL_BARE_FILE_SIZE_RE.search(text) is not None
+        )
 
     async def _dismiss_kukutool_ad_popup(self, page) -> bool:
         """Dismiss only generic first-page advertisements, never verification or size dialogs."""
@@ -987,7 +1071,7 @@ class KukutoolSession(DouyinPublicSession):
             except PlaywrightError:
                 return False
         page_text = str(await evaluate_with_navigation_retry(page, "document.body.innerText"))
-        if self._is_usage_notice(page_text) or self._is_more_sizes_dialog(page_text):
+        if self._is_usage_notice(page_text) or await self._has_more_sizes_dialog(page):
             return False
         if await self._has_visible_kukutool_captcha(page):
             return False
