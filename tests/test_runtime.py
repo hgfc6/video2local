@@ -69,6 +69,52 @@ def test_sync_variant_selection_keeps_best_video_and_all_images(tmp_path: Path) 
     ]
 
 
+def test_sync_uses_largest_kukutool_video_even_when_native_is_higher_quality(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    variants = [
+        VideoVariant("native", "2160p", "H.265", None, 99, None, None, "https://native.example.com/2160.mp4", provider_id="native"),
+        VideoVariant("kuku-small", "720p", "unknown", None, 10, None, None, "https://kuku.example.com/720.mp4", provider_id="kukutool"),
+        VideoVariant("kuku-large", "1080p", "unknown", None, 20, None, None, "https://kuku.example.com/1080.mp4", provider_id="kukutool"),
+    ]
+
+    selected = runtime._select_sync_variants(variants)
+
+    assert [item.download_url for item in selected] == ["https://kuku.example.com/1080.mp4"]
+
+
+def test_video_post_sync_does_not_download_kukutool_image_attachments(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    variants = [
+        VideoVariant("video", "1080p", "unknown", None, 20, None, None, "https://kuku.example.com/video.mp4", provider_id="kukutool"),
+        VideoVariant("image", "无水印图片", "unknown", None, None, None, None, "https://kuku.example.com/image.jpg", provider_id="kukutool"),
+    ]
+
+    selected = runtime._select_sync_variants(
+        variants,
+        page_url="https://www.douyin.com/video/7662725384303208805",
+    )
+
+    assert [item.download_url for item in selected] == ["https://kuku.example.com/video.mp4"]
+
+
+def test_preview_limits_only_kukutool_video_variants_to_largest_two(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    variants = [
+        VideoVariant("540", "540p", "unknown", None, 5, None, None, "https://kuku.example.com/540.mp4"),
+        VideoVariant("720", "720p", "unknown", None, 10, None, None, "https://kuku.example.com/720.mp4"),
+        VideoVariant("1080", "1080p", "unknown", None, 20, None, None, "https://kuku.example.com/1080.mp4"),
+        VideoVariant("image", "无水印图片", "unknown", None, None, None, None, "https://kuku.example.com/1.jpg"),
+    ]
+
+    limited = runtime._limit_kukutool_preview_variants(variants, 2)
+
+    assert [item.download_url for item in limited] == [
+        "https://kuku.example.com/1080.mp4",
+        "https://kuku.example.com/720.mp4",
+        "https://kuku.example.com/1.jpg",
+    ]
+
+
 def test_sync_image_metadata_uses_zero_padded_file_suffix(tmp_path: Path) -> None:
     runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
     metadata = VideoMetadata(
@@ -119,6 +165,60 @@ def test_douyin_card_hint_fills_unknown_kukutool_image_author(tmp_path: Path) ->
 
     assert enriched.author_name == "图文作者"
     assert enriched.title == "图文作品文案"
+
+
+def test_collect_douyin_candidates_ignores_non_card_video_links(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    source = type(
+        "Source",
+        (),
+        {
+            "platform": "douyin",
+            "source_type": SourceType.FAVORITES,
+            "page_url": "https://www.douyin.com/user/self?showTab=favorite_collection",
+        },
+    )()
+    html = (
+        '<a href="/note/7662725384303208805"><img alt="收藏作者：收藏图文"></a>'
+        '<footer><a href="/video/7044844322700791077">推荐作品</a></footer>'
+    )
+
+    with patch(
+        "video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots",
+        return_value=[html],
+    ):
+        candidates = runtime._collect_candidate_urls(source)
+
+    assert candidates == ["https://www.douyin.com/note/7662725384303208805"]
+
+
+def test_collect_douyin_candidates_keeps_card_without_author_caption_alt_text(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    source = type(
+        "Source",
+        (),
+        {
+            "platform": "douyin",
+            "source_type": SourceType.FAVORITES,
+            "page_url": "https://www.douyin.com/user/self?showTab=favorite_collection",
+        },
+    )()
+    html = (
+        '<a href="/note/7662725384303208805"><img alt="收藏作者：收藏图文"></a>'
+        '<a href="/video/7662221016828094958"><img alt="作品封面"></a>'
+        '<footer><a href="/video/7044844322700791077">推荐作品</a></footer>'
+    )
+
+    with patch(
+        "video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots",
+        return_value=[html],
+    ):
+        candidates = runtime._collect_candidate_urls(source)
+
+    assert candidates == [
+        "https://www.douyin.com/note/7662725384303208805",
+        "https://www.douyin.com/video/7662221016828094958",
+    ]
 
 
 def test_runtime_configures_native_share_resolver_only_by_default(tmp_path: Path) -> None:
@@ -690,7 +790,7 @@ def test_preview_sync_returns_merged_variant_summary(tmp_path: Path) -> None:
     assert len(preview.items) == 2
     assert preview.items[0].provider_summary == "kukutool + native"
     assert "超高清" in preview.items[0].variant_summary
-    assert "2160p" not in preview.items[0].variant_summary
+    assert "2160p" in preview.items[0].variant_summary
     assert preview.items[0].selected_quality_label == "超高清"
     assert preview.items[0].selected_file_size == 67819321
     assert preview.items[0].metadata.author_name == "author-735001"

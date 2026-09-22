@@ -31,6 +31,7 @@ class VideoMetadata:
     duration_seconds: int | None = None
     format_selector: str | None = None
     author_handle: str | None = None
+    media_type: str | None = None
 
 
 @dataclass(frozen=True)

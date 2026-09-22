@@ -56,7 +56,7 @@ class ArchiveManager:
         """Use a stable Douyin handle alongside the display name when available."""
         author = self.safe_name(metadata.author_name)
         if metadata.platform == "douyin" and metadata.author_handle:
-            return f"{author}+{self.safe_name(metadata.author_handle)}"
+            return f"{author}-{self.safe_name(metadata.author_handle)}"
         return author
 
     def build_target_path(self, metadata: VideoMetadata, file_ext: str) -> Path:

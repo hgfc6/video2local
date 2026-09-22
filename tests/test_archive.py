@@ -49,7 +49,7 @@ def test_build_target_path_uses_douyin_author_name_and_handle(tmp_path: Path) ->
     )
 
     assert manager.build_target_path(metadata, "mp4") == (
-        tmp_path / "douyin" / "作者A+douyin_123" / "作品文案-735001.mp4"
+        tmp_path / "douyin" / "作者A-douyin_123" / "作品文案-735001.mp4"
     )
 
 

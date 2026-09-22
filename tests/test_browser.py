@@ -88,7 +88,19 @@ def test_kukutool_keeps_only_largest_video_but_all_image_entries() -> None:
     ]
 
 
-def test_find_kukutool_page_requires_the_visible_parse_form() -> None:
+def test_kukutool_video_link_selection_prefers_ultra_then_1080_then_720() -> None:
+    assert KukutoolSession._select_preferred_kukutool_video_button(
+        ["下载 540p (1.0MB)", "下载 720p (2.0MB)", "下载 1080p (3.0MB)", "下载 超高清 (4.0MB)"]
+    ) == 3
+    assert KukutoolSession._select_preferred_kukutool_video_button(
+        ["下载 540p (1.0MB)", "下载 720p (2.0MB)", "下载 1080p (3.0MB)"]
+    ) == 2
+    assert KukutoolSession._select_preferred_kukutool_video_button(
+        ["下载 540p (1.0MB)", "下载 720p (2.0MB)"]
+    ) == 1
+
+
+def test_find_kukutool_page_requires_the_visible_parse_button() -> None:
     class FakeLocator:
         def __init__(self, count: int) -> None:
             self._count = count
@@ -107,7 +119,7 @@ def test_find_kukutool_page_requires_the_visible_parse_form() -> None:
                 return FakeLocator(self._textboxes)
             return FakeLocator(self._parse_buttons)
 
-    form_page = FakePage("https://dy.kukutool.com/", 1, 1)
+    form_page = FakePage("https://dy.kukutool.com/", 0, 1)
     empty_page = FakePage("https://dy.kukutool.com/other", 0, 0)
     browser = type("FakeBrowser", (), {"contexts": [type("FakeContext", (), {"pages": [empty_page, form_page]})()]})()
 
@@ -122,6 +134,12 @@ def test_kukutool_result_wait_expression_matches_downloadable_quality_buttons() 
     assert "下载" in expression
     assert "下载无水印" in expression
     assert "KB|MB|GB" in expression
+
+
+def test_kukutool_waits_for_previous_result_controls_to_clear() -> None:
+    source = KukutoolSession._wait_for_previous_results_to_clear.__code__.co_consts
+
+    assert any("未清除上一条作品" in value for value in source if isinstance(value, str))
 
 
 def test_kukutool_clipboard_capture_script_intercepts_write_text() -> None:

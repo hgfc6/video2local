@@ -502,7 +502,8 @@ class KukutoolSession(DouyinPublicSession):
         clear_button = page.get_by_role("button", name="清除内容")
         if await clear_button.count():
             await clear_button.click()
-        text_box = page.get_by_role("textbox", name="粘贴带链接的文本")
+            await self._wait_for_previous_results_to_clear(page)
+        text_box = await self._wait_for_kukutool_input(page)
         await text_box.fill(share_url)
         await page.get_by_role("button", name="开始解析").click()
         await page.wait_for_timeout(300)
@@ -528,9 +529,13 @@ class KukutoolSession(DouyinPublicSession):
         capture_enabled = await self._install_clipboard_capture(page)
         try:
             button_texts = [" ".join(text.split()) for text in await quality_buttons.all_text_contents()]
+            selected_video_index = self._select_preferred_kukutool_video_button(button_texts)
             for index, button_text in enumerate(button_texts):
                 variant = self._parse_download_button_text(button_text)
                 if variant is None:
+                    continue
+                is_video = "图片" not in str(variant["type"]) and "实况图" not in str(variant["type"])
+                if is_video and index != selected_video_index:
                     continue
                 quality_label = self._next_media_label(variant, media_counts)
                 variant = {**variant, "type": quality_label}
@@ -605,6 +610,20 @@ class KukutoolSession(DouyinPublicSession):
         videos = [entry for entry in entries if entry not in images]
         best_video = max(videos, key=lambda entry: int(entry.get("size") or 0), default=None)
         return ([best_video] if best_video is not None else []) + images
+
+    @classmethod
+    def _select_preferred_kukutool_video_button(cls, button_texts: list[str]) -> int | None:
+        """Choose one video quality before copying any links from Kuku."""
+        parsed = [cls._parse_download_button_text(text) for text in button_texts]
+        for quality in ("超高清", "1080p", "720p"):
+            for index, variant in enumerate(parsed):
+                if variant is not None and str(variant["type"]).lower() == quality.lower():
+                    return index
+        # Some mixed posts expose only a generic no-watermark video button.
+        for index, variant in enumerate(parsed):
+            if variant is not None and variant["type"] == "无水印视频":
+                return index
+        return None
 
     @staticmethod
     def _quality_result_wait_expression() -> str:
@@ -689,7 +708,7 @@ class KukutoolSession(DouyinPublicSession):
             try:
                 page = await self._find_kukutool_page(browser, base_url)
                 if page is None:
-                    raise RuntimeError("请先在专用 Chrome 中打开 Kukutool 首页，并保持“粘贴带链接的文本”和“开始解析”控件可见")
+                    raise RuntimeError("请先在专用 Chrome 中打开 Kukutool 首页，并保持“开始解析”按钮可见")
                 await self._wait_for_user_to_clear_kukutool_gate(page, base_url=base_url)
                 await page.context.grant_permissions(
                     ["clipboard-read", "clipboard-write"],
@@ -714,13 +733,23 @@ class KukutoolSession(DouyinPublicSession):
                 if urlparse(page.url).netloc != host:
                     continue
                 try:
-                    text_box = page.get_by_role("textbox", name="粘贴带链接的文本")
                     parse_button = page.get_by_role("button", name="开始解析")
-                    if await text_box.count() == 1 and await parse_button.count() == 1:
+                    if await parse_button.count() == 1:
                         return page
                 except PlaywrightError:
                     continue
         return None
+
+    @staticmethod
+    async def _wait_for_kukutool_input(page, *, timeout_seconds: int = 15):
+        """Locate Kuku's dynamic input without relying on its changing ARIA name."""
+        selector = "textarea, input:not([type]), input[type='text'], [contenteditable='true']"
+        for _ in range(timeout_seconds * 10):
+            text_boxes = page.locator(selector)
+            if await text_boxes.count():
+                return text_boxes.nth(0)
+            await page.wait_for_timeout(100)
+        raise RuntimeError("Kukutool 页面未加载链接输入框，请等待页面加载完成后重试")
 
     @staticmethod
     def _is_kukutool_page(page_url: str, base_url: str) -> bool:
@@ -747,6 +776,18 @@ class KukutoolSession(DouyinPublicSession):
             except PlaywrightTimeoutError:
                 continue
         raise PlaywrightTimeoutError("Kukutool quality results did not appear before timeout")
+
+    async def _wait_for_previous_results_to_clear(self, page, *, timeout_seconds: int = 10) -> None:
+        """Avoid treating the prior work's download buttons as the next result."""
+        for _ in range(timeout_seconds * 10):
+            has_results = await evaluate_with_navigation_retry(
+                page,
+                self._quality_result_wait_expression(),
+            )
+            if not has_results:
+                return
+            await page.wait_for_timeout(100)
+        raise RuntimeError("Kukutool 未清除上一条作品的解析结果，请点击“清除内容”后重试")
 
     async def _wait_for_user_to_clear_kukutool_gate(
         self,

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from mimetypes import guess_extension
 import json
 import os
 from pathlib import Path
@@ -205,6 +206,8 @@ class YtDlpService:
         return f"视频信息解析失败，yt-dlp 未返回可读结果: {url}"
 
     def should_download_direct(self, metadata: VideoMetadata) -> bool:
+        if metadata.media_type in {"image", "live_photo"}:
+            return True
         download_url = metadata.download_url
         return any(
             marker in download_url
@@ -279,7 +282,6 @@ class YtDlpService:
             cookies_from_browser=None,
             filename_stem=filename_stem,
         )
-        output_path = request.download_dir / f"{request.filename_stem}.mp4"
         http_request = Request(
             metadata.download_url,
             headers={
@@ -291,8 +293,11 @@ class YtDlpService:
                 "Referer": metadata.page_url,
             },
         )
+        output_path: Path | None = None
         try:
             with urlopen(http_request, timeout=DIRECT_DOWNLOAD_TIMEOUT_SECONDS) as response:
+                extension = self._direct_media_extension(metadata, response)
+                output_path = request.download_dir / f"{request.filename_stem}.{extension}"
                 with output_path.open("wb") as output_file:
                     while True:
                         if self._stop_event.is_set():
@@ -302,6 +307,20 @@ class YtDlpService:
                             break
                         output_file.write(chunk)
         except Exception:
-            output_path.unlink(missing_ok=True)
+            if output_path is not None:
+                output_path.unlink(missing_ok=True)
             raise
-        return "mp4", str(output_path)
+        assert output_path is not None
+        return output_path.suffix.lstrip("."), str(output_path)
+
+    @staticmethod
+    def _direct_media_extension(metadata: VideoMetadata, response) -> str:
+        if metadata.media_type not in {"image", "live_photo"}:
+            return "mp4"
+        headers = getattr(response, "headers", None)
+        content_type = headers.get("Content-Type", "") if headers is not None else ""
+        mime_type = content_type.split(";", maxsplit=1)[0].strip().lower()
+        extension = guess_extension(mime_type)
+        if extension:
+            return extension.lstrip(".").replace("jpe", "jpg")
+        return "jpg" if metadata.media_type == "image" else "mp4"
