@@ -84,6 +84,17 @@ class YtDlpService:
             return [self.binary_name]
         return list(self.binary_name)
 
+    def _uses_embedded_ytdlp(self) -> bool:
+        """A frozen app must not relaunch its own EXE as ``python -m yt_dlp``."""
+        return self.binary_name is None and bool(getattr(sys, "frozen", False))
+
+    @staticmethod
+    def _background_process_kwargs() -> dict[str, int]:
+        """Keep CLI helpers invisible when the desktop app is running on Windows."""
+        if os.name != "nt":
+            return {}
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+
     def build_request(
         self,
         metadata: VideoMetadata,
@@ -166,6 +177,12 @@ class YtDlpService:
         cookies_from_browser: str | None = None,
         cookies_file: Path | None = None,
     ) -> dict:
+        if self._uses_embedded_ytdlp():
+            return self._probe_with_embedded_ytdlp(
+                url=url,
+                cookies_from_browser=cookies_from_browser,
+                cookies_file=cookies_file,
+            )
         command = [
             *self.command_prefix(),
             "--ignore-config",
@@ -184,6 +201,7 @@ class YtDlpService:
                 text=True,
                 check=False,
                 timeout=PROBE_TIMEOUT_SECONDS,
+                **self._background_process_kwargs(),
             )
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("视频信息解析超时，请检查网络后重试") from exc
@@ -195,6 +213,49 @@ class YtDlpService:
             raise RuntimeError(self._probe_error_message(url, completed.stderr, completed.stdout)) from exc
         if not isinstance(payload, dict):
             raise RuntimeError(self._probe_error_message(url, completed.stderr, completed.stdout))
+        return payload
+
+    @staticmethod
+    def _embedded_ytdlp_options(
+        *,
+        cookies_from_browser: str | None,
+        cookies_file: Path | None,
+    ) -> dict:
+        options: dict = {
+            "ignoreconfig": True,
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+            "noplaylist": True,
+        }
+        if cookies_file is not None:
+            options["cookiefile"] = str(cookies_file)
+        elif cookies_from_browser:
+            options["cookiesfrombrowser"] = (cookies_from_browser,)
+        return options
+
+    def _probe_with_embedded_ytdlp(
+        self,
+        *,
+        url: str,
+        cookies_from_browser: str | None,
+        cookies_file: Path | None,
+    ) -> dict:
+        from yt_dlp import YoutubeDL
+        from yt_dlp.utils import DownloadError
+
+        options = self._embedded_ytdlp_options(
+            cookies_from_browser=cookies_from_browser,
+            cookies_file=cookies_file,
+        )
+        options["skip_download"] = True
+        try:
+            with YoutubeDL(options) as ydl:
+                payload = ydl.extract_info(url, download=False)
+        except DownloadError as exc:
+            raise RuntimeError(self._probe_error_message(url, str(exc), "")) from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(self._probe_error_message(url, "", ""))
         return payload
 
     def _probe_error_message(self, url: str, stderr: str, stdout: str) -> str:
@@ -240,10 +301,52 @@ class YtDlpService:
             filename_stem=filename_stem,
             format_selector=format_selector,
         )
+        if self._uses_embedded_ytdlp():
+            return self._download_with_embedded_ytdlp(request)
         command = self.build_command(request)
         completed = self._run_download_command(command)
         output_path = completed.stdout.strip().splitlines()[-1]
         return self.infer_extension(output_path), output_path
+
+    def _download_with_embedded_ytdlp(self, request: DownloadRequest) -> tuple[str, str]:
+        """Run the bundled yt-dlp library without spawning another Video2Local EXE."""
+        from yt_dlp import YoutubeDL
+        from yt_dlp.utils import DownloadError
+
+        request.download_dir.mkdir(parents=True, exist_ok=True)
+        output_template = str(request.download_dir / f"{request.filename_stem}.%(ext)s")
+        options = self._embedded_ytdlp_options(
+            cookies_from_browser=request.cookies_from_browser,
+            cookies_file=request.cookies_file,
+        )
+        options.update(
+            {
+                "format": request.format_selector or "bv*+ba/b",
+                "merge_output_format": "mp4",
+                "outtmpl": output_template,
+            }
+        )
+        ffmpeg_directory = self._ffmpeg_directory()
+        if ffmpeg_directory is not None:
+            options["ffmpeg_location"] = str(ffmpeg_directory)
+        existing_paths = set(request.download_dir.glob(f"{request.filename_stem}.*"))
+        try:
+            with YoutubeDL(options) as ydl:
+                ydl.extract_info(request.url, download=True)
+        except DownloadError as exc:
+            raise RuntimeError(f"视频下载失败: {exc}") from exc
+        candidates = [
+            path
+            for path in request.download_dir.glob(f"{request.filename_stem}.*")
+            if path not in existing_paths and path.is_file() and path.suffix not in {".part", ".ytdl"}
+        ]
+        if not candidates:
+            raise RuntimeError("yt-dlp 未返回下载文件路径")
+        output_path = max(
+            candidates,
+            key=lambda path: (path.suffix.lower() == ".mp4", path.stat().st_mtime_ns),
+        )
+        return self.infer_extension(str(output_path)), str(output_path)
 
     def _run_download_command(self, command: list[str]) -> subprocess.CompletedProcess[str]:
         with self._process_lock:
@@ -252,6 +355,7 @@ class YtDlpService:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                **self._background_process_kwargs(),
             )
             process = self._active_process
         try:

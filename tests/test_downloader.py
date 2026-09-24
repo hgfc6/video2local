@@ -117,6 +117,19 @@ def test_default_command_uses_current_python_module_invocation(tmp_path: Path) -
     assert command[:3] == [sys.executable, "-m", "yt_dlp"]
 
 
+def test_frozen_app_uses_embedded_ytdlp_instead_of_relaunching_its_executable(tmp_path: Path, monkeypatch) -> None:
+    service = YtDlpService()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+
+    assert service._uses_embedded_ytdlp() is True
+
+
+def test_background_cli_processes_are_hidden_on_windows() -> None:
+    kwargs = YtDlpService._background_process_kwargs()
+
+    assert kwargs.get("creationflags", 0) == getattr(__import__("subprocess"), "CREATE_NO_WINDOW", 0)
+
+
 def test_build_command_prefers_cookie_file_over_browser_source(tmp_path: Path) -> None:
     service = YtDlpService(binary_name="yt-dlp")
     cookie_file = tmp_path / "cookies.txt"

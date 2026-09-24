@@ -942,12 +942,18 @@ class KukutoolSession(DouyinPublicSession):
     def _read_windows_clipboard() -> str:
         """Kukutool's copy button writes to the system clipboard on Windows."""
         try:
+            process_kwargs = (
+                {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+                if os.name == "nt"
+                else {}
+            )
             result = subprocess.run(
                 ["powershell", "-NoProfile", "-Command", "Get-Clipboard -Raw"],
                 capture_output=True,
                 check=False,
                 text=True,
                 timeout=5,
+                **process_kwargs,
             )
         except (OSError, subprocess.TimeoutExpired):
             return ""

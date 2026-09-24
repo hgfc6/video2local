@@ -263,6 +263,12 @@ def test_kukutool_clipboard_capture_script_intercepts_write_text() -> None:
     assert any("clipboard.writeText" in value for value in source if isinstance(value, str))
 
 
+def test_kukutool_clipboard_fallback_hides_its_powershell_process() -> None:
+    source = KukutoolSession._read_windows_clipboard.__code__.co_consts
+
+    assert any("CREATE_NO_WINDOW" in value for value in source if isinstance(value, str))
+
+
 def test_kukutool_page_check_rejects_ad_navigation() -> None:
     base_url = "https://dy.kukutool.com/"
 
