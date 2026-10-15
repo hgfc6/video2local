@@ -963,9 +963,9 @@ class KukutoolSession(DouyinPublicSession):
         async with async_playwright() as playwright:
             browser = await playwright.chromium.connect_over_cdp(f"http://{self.host}:{self.port}")
             try:
-                page = await self._find_kukutool_page(browser, base_url)
+                page = await self._wait_for_kukutool_page_ready(browser, base_url=base_url)
                 if page is None:
-                    raise RuntimeError("请先在专用 Chrome 中打开 Kukutool 首页，并保持“开始解析”按钮可见")
+                    raise RuntimeError("未检测到已就绪的 Kukutool 页面，请等待首页加载完成后重试")
                 await self._wait_for_user_to_clear_kukutool_gate(page, base_url=base_url)
                 await page.context.grant_permissions(
                     ["clipboard-read", "clipboard-write"],
@@ -982,23 +982,48 @@ class KukutoolSession(DouyinPublicSession):
         return results
 
     @staticmethod
-    async def _find_kukutool_page(browser, base_url: str):
+    async def _find_kukutool_page(browser, base_url: str, *, require_parse_button: bool = True):
         """Return the existing Kukutool page, including a transient ad insert."""
-        host = urlparse(base_url).netloc
+        candidate = None
         for context in browser.contexts:
             for page in context.pages:
-                if urlparse(page.url).netloc != host:
+                if not KukutoolSession._is_kukutool_page(page.url, base_url):
                     continue
                 # Google vignette keeps Kukutool's host but removes its document.
                 # Return this page so the normal gate handler can navigate back.
                 if KukutoolSession._is_google_vignette(page.url):
                     return page
+                if not require_parse_button:
+                    candidate = candidate or page
+                    continue
                 try:
                     parse_button = page.get_by_role("button", name=KUKUTOOL_PARSE_BUTTON_RE)
                     if await parse_button.count():
                         return page
                 except PlaywrightError:
                     continue
+        return candidate
+
+    async def _wait_for_kukutool_page_ready(self, browser, *, base_url: str, timeout_seconds: int = 20):
+        """Wait for Chrome's Kukutool tab to finish client-side rendering.
+
+        Chrome exposes a new tab through CDP before Kukutool renders its parse
+        button. A one-shot lookup made startup intermittently look like a
+        missing page.
+        """
+        for _ in range(timeout_seconds * 5):
+            page = await self._find_kukutool_page(browser, base_url)
+            if page is not None:
+                return page
+            candidate = await self._find_kukutool_page(
+                browser,
+                base_url,
+                require_parse_button=False,
+            )
+            if candidate is None:
+                await asyncio.sleep(0.2)
+            else:
+                await candidate.wait_for_timeout(200)
         return None
 
     @staticmethod
@@ -1014,7 +1039,9 @@ class KukutoolSession(DouyinPublicSession):
 
     @staticmethod
     def _is_kukutool_page(page_url: str, base_url: str) -> bool:
-        return urlparse(page_url).netloc == urlparse(base_url).netloc
+        page_host = (urlparse(page_url).hostname or "").lower()
+        base_host = (urlparse(base_url).hostname or "").lower()
+        return bool(page_host and base_host and (page_host == base_host or page_host.endswith(f".{base_host}")))
 
     @staticmethod
     def _is_google_vignette(page_url: str) -> bool:

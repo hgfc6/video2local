@@ -55,6 +55,84 @@ def test_sync_engine_skips_existing_video_and_downloads_new_one(tmp_path: Path) 
     assert downloader.downloads == ["735002"]
 
 
+def test_sync_engine_can_overwrite_or_timestamp_existing_files(tmp_path: Path) -> None:
+    @dataclass
+    class WritingDownloader:
+        downloads: list[str]
+
+        def download(
+            self,
+            metadata: VideoMetadata,
+            target_dir: Path,
+            cookies_file: Path | None = None,
+            filename_stem: str | None = None,
+        ) -> tuple[str, str]:
+            stem = filename_stem or f"{metadata.title}-{metadata.video_id}"
+            path = target_dir / f"{stem}.mp4"
+            path.write_text("new", encoding="utf-8")
+            self.downloads.append(path.name)
+            return "mp4", str(path)
+
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="735001",
+        title="旧视频",
+        author_name="张三",
+        page_url="https://www.douyin.com/video/735001",
+        download_url="https://www.douyin.com/video/735001",
+    )
+    archive = ArchiveManager(download_root=tmp_path)
+    existing_path = archive.build_target_path(metadata, "mp4")
+    existing_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_path.write_text("old", encoding="utf-8")
+    downloader = WritingDownloader(downloads=[])
+    engine = SyncEngine(repository=None, downloader=downloader, archive_manager=archive)
+
+    overwrite_summary = engine.sync_items([metadata], collision_policy="overwrite")
+
+    assert overwrite_summary.downloaded_count == 1
+    assert existing_path.read_text(encoding="utf-8") == "new"
+
+    timestamp_summary = engine.sync_items([metadata], collision_policy="timestamp")
+
+    assert timestamp_summary.downloaded_count == 1
+    assert len(list(existing_path.parent.glob("旧视频-735001-*.mp4"))) == 1
+
+
+def test_sync_report_includes_selected_source_and_file_size_evidence(tmp_path: Path) -> None:
+    @dataclass
+    class WritingDownloader:
+        def download(self, metadata: VideoMetadata, target_dir: Path, cookies_file: Path | None = None) -> tuple[str, str]:
+            path = target_dir / "作品-735001.mp4"
+            path.write_bytes(b"12345")
+            return "mp4", str(path)
+
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="735001",
+        title="作品",
+        author_name="张三",
+        page_url="https://www.douyin.com/video/735001",
+        download_url="https://cdn.example.com/作品.mp4",
+        expected_file_size=5,
+        selected_provider_id="cdn",
+        selected_quality_label="原始高码率",
+        selected_file_size=5,
+    )
+    engine = SyncEngine(repository=None, downloader=WritingDownloader(), archive_manager=ArchiveManager(download_root=tmp_path))
+
+    summary = engine.sync_items([metadata], report_dir=tmp_path)
+
+    report = Path(summary.report_path or "").read_text(encoding="utf-8")
+    assert "最终解析来源: cdn" in report
+    assert "最终清晰度: 原始高码率" in report
+    assert "解析版本大小: 5" in report
+    assert "解析文件大小: 5" in report
+    assert "实际文件大小: 5" in report
+
+
 def test_sync_engine_reports_progress_for_each_processed_item(tmp_path: Path) -> None:
     downloader = FakeDownloader(downloads=[])
     archive = ArchiveManager(download_root=tmp_path)

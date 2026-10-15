@@ -22,7 +22,9 @@ class MainController:
     output_dir_text: str = ""
     sync_limit_text: str = ""
     retry_count_text: str = "1"
+    collision_policy: str = "skip"
     flat_output_enabled: bool = False
+    diagnostics_text: str = ""
     resolver_sources: tuple[str, ...] = ("native", "kukutool", "cdn")
     platform_mode: str = "douyin"
 
@@ -180,6 +182,22 @@ class MainController:
         self.retry_count_text = str(retry_count)
         if hasattr(self.engine, "set_retry_count"):
             self.engine.set_retry_count(retry_count)
+
+    def set_collision_policy(self, policy: str) -> None:
+        if policy not in {"skip", "overwrite", "timestamp"}:
+            raise ValueError("不支持的同名文件处理方式")
+        self.collision_policy = policy
+        if hasattr(self.engine, "set_collision_policy"):
+            self.engine.set_collision_policy(policy)
+
+    def copy_diagnostics(self) -> None:
+        build_diagnostics = getattr(self.engine, "build_diagnostics", None)
+        if build_diagnostics is None:
+            self.status_text = "当前运行时未提供诊断信息"
+            return
+        self.diagnostics_text = build_diagnostics()
+        self.status_text = "诊断信息已生成"
+        self.detail_text = "已复制到剪贴板，可直接粘贴反馈"
 
     def set_flat_output(self, enabled: bool) -> None:
         self.flat_output_enabled = enabled
@@ -380,8 +398,9 @@ class MainController:
             else:
                 title = progress.current_title or progress.current_video_id
                 self.detail_text = f"最后处理: {progress.current_author_name} / {title}"
-            if summary.report_path:
-                self.summary_text = f"结果清单: {summary.report_path}"
+            report_path = getattr(summary, "report_path", None)
+            if report_path:
+                self.summary_text = f"结果清单: {report_path}"
 
     def _apply_sync_preview(self, result: object) -> None:
         items = list(getattr(result, "items", []))

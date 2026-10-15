@@ -1317,6 +1317,8 @@ def test_open_downloads_dir_uses_windows_shell(tmp_path: Path) -> None:
 def test_download_first_visible_sample_writes_first_visible_video_to_smoke_test_dir(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     runtime = AppRuntime(settings=settings)
+    runtime.set_resolver_sources(("native",))
+    cookies_path = tmp_path / "cookies.txt"
     metadata = VideoMetadata(
         platform="douyin",
         source_type=SourceType.AUTHOR_VIDEOS,
@@ -1345,14 +1347,65 @@ def test_download_first_visible_sample_writes_first_visible_video_to_smoke_test_
 
     with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=post"):
         with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/7062344670323526953">video</a>']):
-            with patch("video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail", return_value=detail_payload):
-                with patch.object(runtime.downloader, "download", return_value=("mp4", str(tmp_path / "downloads" / "_smoke_test" / "sample.mp4"))) as download_mock:
-                    result = runtime.download_first_visible_sample()
+            with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+                with patch("video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail", return_value=detail_payload):
+                    with patch.object(runtime.downloader, "download", return_value=("mp4", str(tmp_path / "downloads" / "_smoke_test" / "sample.mp4"))) as download_mock:
+                        result = runtime.download_first_visible_sample()
 
     assert result.metadata.video_id == "7062344670323526953"
     assert result.local_path.endswith("sample.mp4")
     assert download_mock.call_args.args[0].video_id == "7062344670323526953"
     assert download_mock.call_args.args[1] == settings.paths.downloads_dir / "_smoke_test"
+
+
+def test_download_first_visible_sample_uses_largest_cdn_variant(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    runtime.set_resolver_sources(("native", "cdn"))
+    cookies_path = tmp_path / "cookies.txt"
+    payload = {
+        "aweme_detail": {
+            "aweme_id": "7062344670323526953",
+            "desc": "样本视频",
+            "author": {"nickname": "测试作者"},
+            "video": {
+                "bit_rate": [
+                    {
+                        "gear_name": "1080_1_1",
+                        "bit_rate": 3_000_000,
+                        "play_addr": {
+                            "data_size": 3_000_000,
+                            "width": 1080,
+                            "height": 1920,
+                            "url_list": ["https://native.example.com/1080.mp4"],
+                        },
+                    }
+                ]
+            },
+        }
+    }
+    cdn_variant = VideoVariant(
+        variant_id="cdn_default",
+        quality_label="原始高码率",
+        codec_label="unknown",
+        bit_rate=None,
+        file_size=60_000_000,
+        width=None,
+        height=None,
+        download_url="https://v99-coldx.douyinvod.com/original.mp4",
+        provider_id="cdn",
+    )
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.get_active_page_url", return_value="https://www.douyin.com/user/self?showTab=post"):
+        with patch("video2local.app_runtime.ChromeRemoteSession.fetch_active_page_html_snapshots", return_value=['<a href="/video/7062344670323526953">video</a>']):
+            with patch("video2local.app_runtime.ChromeRemoteSession.export_cookies", return_value=cookies_path):
+                with patch("video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail", return_value=payload):
+                    with patch.object(CdnDouyinResolver, "resolve_variants_from_payload", return_value=[cdn_variant]):
+                        with patch.object(runtime.downloader, "download", return_value=("mp4", str(tmp_path / "sample.mp4"))) as download_mock:
+                            runtime.download_first_visible_sample()
+
+    selected = download_mock.call_args.args[0]
+    assert selected.download_url == cdn_variant.download_url
+    assert selected.expected_file_size == cdn_variant.file_size
 
 
 def test_parse_share_text_returns_metadata_and_variants_without_login(tmp_path: Path) -> None:
@@ -1432,6 +1485,74 @@ def test_parse_native_note_skips_kukutool_and_cdn(tmp_path: Path) -> None:
         "https://p3.douyinpic.com/two.jpeg",
     ]
     kukutool_parse_mock.assert_not_called()
+    cdn_resolve_mock.assert_not_called()
+
+
+def test_parse_note_uses_native_attachments_when_only_cdn_is_enabled(tmp_path: Path) -> None:
+    settings = AppSettings.for_root(
+        tmp_path,
+        platform_name="douyin",
+        supported_source_types=("favorites", "author_videos"),
+        share_resolvers=ShareResolverSettings(enabled_sources=("cdn",)),
+    )
+    runtime = AppRuntime(settings=settings)
+    payload = {
+        "aweme_detail": {
+            "aweme_id": "7688148414848400015",
+            "desc": "雨林人像",
+            "author": {"nickname": "光影予夏"},
+            "images": [
+                {"url_list": ["https://p3.douyinpic.com/one.jpeg"]},
+                {"url_list": ["https://p3.douyinpic.com/two.jpeg"]},
+            ],
+        }
+    }
+
+    with patch(
+        "video2local.app_runtime.DouyinSignedSession.fetch_share_aweme_detail",
+        return_value=("https://www.douyin.com/note/7688148414848400015", payload),
+    ):
+        with patch("video2local.app_runtime.CdnDouyinResolver.resolve_variants_from_payload") as cdn_resolve_mock:
+            result = runtime.parse_share_text("https://v.douyin.com/BDADO9Feg5s/")
+
+    assert result.provider_id == "native(图集回退)"
+    assert [variant.download_url for variant in result.variants] == [
+        "https://p3.douyinpic.com/one.jpeg",
+        "https://p3.douyinpic.com/two.jpeg",
+    ]
+    cdn_resolve_mock.assert_not_called()
+
+
+def test_sync_preview_note_uses_native_attachments_when_only_cdn_is_enabled(tmp_path: Path) -> None:
+    settings = AppSettings.for_root(
+        tmp_path,
+        platform_name="douyin",
+        supported_source_types=("favorites", "author_videos"),
+        share_resolvers=ShareResolverSettings(enabled_sources=("cdn",)),
+    )
+    runtime = AppRuntime(settings=settings)
+    cookies_path = tmp_path / "cookies.txt"
+    payload = {
+        "aweme_detail": {
+            "aweme_id": "7688148414848400015",
+            "desc": "雨林人像",
+            "author": {"nickname": "光影予夏"},
+            "images": [{"url_list": ["https://p3.douyinpic.com/one.jpeg"]}],
+        }
+    }
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail", return_value=payload):
+        with patch("video2local.app_runtime.CdnDouyinResolver.resolve_variants_from_payload") as cdn_resolve_mock:
+            metadata, provider_summary, _, _, variants = runtime._resolve_douyin_sync_metadata(
+                page_url="https://www.douyin.com/note/7688148414848400015",
+                source_type=SourceType.FAVORITES,
+                cookies_path=cookies_path,
+                include_variants=True,
+            )
+
+    assert metadata.video_id == "7688148414848400015"
+    assert provider_summary == "native(图集回退)"
+    assert [variant.download_url for variant in variants] == ["https://p3.douyinpic.com/one.jpeg"]
     cdn_resolve_mock.assert_not_called()
 
 
@@ -1709,6 +1830,24 @@ def test_download_share_variant_can_write_directly_into_output_root(tmp_path: Pa
         runtime.download_share_variant(parse_result, "720_1_1")
 
     assert download_mock.call_args.args[1] == custom_dir
+    assert download_mock.call_args.kwargs["filename_stem"] == "香菜严选-分享视频-7651428709099242127-720p"
+
+
+def test_runtime_diagnostics_excludes_signed_download_url(tmp_path: Path) -> None:
+    runtime = AppRuntime(settings=AppSettings.default_for_root(tmp_path))
+    runtime.last_resolution_diagnostics = {
+        "page_url": "https://www.douyin.com/video/735001",
+        "sources": ["native", "cdn"],
+        "errors": ["kukutool temporary unavailable"],
+        "variant_count": 3,
+    }
+
+    with patch("video2local.app_runtime.ChromeRemoteSession.list_page_urls", return_value=["https://dy.kukutool.com/en/"]):
+        diagnostics = runtime.build_diagnostics()
+
+    assert "Kukutool 页面: 已检测到" in diagnostics
+    assert "kukutool temporary unavailable" in diagnostics
+    assert "https://cdn.example.com" not in diagnostics
 
 
 def test_parse_bilibili_share_text_uses_native_formats_without_kukutool(tmp_path: Path) -> None:

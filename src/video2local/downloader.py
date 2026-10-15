@@ -108,7 +108,11 @@ class YtDlpService:
             url=metadata.download_url,
             download_dir=download_dir,
             filename_stem=filename_stem
-            or self.archive_manager.build_filename_stem(video_id=metadata.video_id, title=metadata.title),
+            or self.archive_manager.build_filename_stem(
+                video_id=metadata.video_id,
+                title=metadata.title,
+                author_name=metadata.author_name,
+            ),
             cookies_from_browser=cookies_from_browser,
             cookies_file=cookies_file,
             format_selector=format_selector,
@@ -410,12 +414,25 @@ class YtDlpService:
                         if not chunk:
                             break
                         output_file.write(chunk)
+            self._validate_expected_file_size(metadata, output_path)
         except Exception:
             if output_path is not None:
                 output_path.unlink(missing_ok=True)
             raise
         assert output_path is not None
         return output_path.suffix.lstrip("."), str(output_path)
+
+    @staticmethod
+    def _validate_expected_file_size(metadata: VideoMetadata, output_path: Path) -> None:
+        """Reject a CDN response that differs from the size resolved for this variant."""
+        expected_size = metadata.expected_file_size
+        if expected_size is None:
+            return
+        actual_size = output_path.stat().st_size
+        if actual_size != expected_size:
+            raise RuntimeError(
+                f"下载文件大小与 CDN 解析结果不一致: 期望 {expected_size} 字节，实际 {actual_size} 字节"
+            )
 
     @staticmethod
     def _direct_media_extension(metadata: VideoMetadata, response) -> str:

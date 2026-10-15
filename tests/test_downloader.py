@@ -174,6 +174,24 @@ def test_build_request_uses_metadata_title_and_id_for_target_name(tmp_path: Path
     assert request.filename_stem == "海边落日-735003"
 
 
+def test_build_request_in_flat_mode_prefixes_author_name(tmp_path: Path) -> None:
+    service = YtDlpService(binary_name="yt-dlp")
+    service.archive_manager.flatten_into_root = True
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="735003",
+        title="#海边落日",
+        author_name="王五",
+        page_url="https://www.douyin.com/video/735003",
+        download_url="https://www.douyin.com/video/735003",
+    )
+
+    request = service.build_request(metadata=metadata, download_dir=tmp_path, cookies_from_browser="chrome")
+
+    assert request.filename_stem == "王五-海边落日-735003"
+
+
 def test_download_returns_extension_and_output_path_from_completed_process(tmp_path: Path) -> None:
     service = YtDlpService(binary_name="yt-dlp")
     metadata = VideoMetadata(
@@ -251,6 +269,7 @@ def test_download_direct_media_url_writes_mp4_file_without_yt_dlp(tmp_path: Path
         author_name="赵六",
         page_url="https://www.douyin.com/video/735004",
         download_url="https://cdn.example.com/video.mp4?mime_type=video_mp4",
+        expected_file_size=11,
     )
 
     class FakeResponse:
@@ -274,6 +293,43 @@ def test_download_direct_media_url_writes_mp4_file_without_yt_dlp(tmp_path: Path
     assert Path(local_path).read_bytes() == b"video-bytes"
     assert open_mock.called is True
     run_mock.assert_not_called()
+
+
+def test_download_direct_cdn_media_rejects_a_size_mismatch(tmp_path: Path) -> None:
+    service = YtDlpService(binary_name="yt-dlp")
+    metadata = VideoMetadata(
+        platform="douyin",
+        source_type=SourceType.FAVORITES,
+        video_id="735004",
+        title="晴天",
+        author_name="赵六",
+        page_url="https://www.douyin.com/video/735004",
+        download_url="https://v99-coldx.douyinvod.com/video.mp4",
+        expected_file_size=20,
+    )
+
+    class FakeResponse:
+        def __init__(self) -> None:
+            self._chunks = [b"too-short", b""]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self, size: int = -1) -> bytes:
+            return self._chunks.pop(0)
+
+    with patch("video2local.downloader.urlopen", return_value=FakeResponse()):
+        try:
+            service.download(metadata=metadata, target_dir=tmp_path)
+        except RuntimeError as exc:
+            assert "大小与 CDN 解析结果不一致" in str(exc)
+        else:
+            raise AssertionError("expected a CDN file-size validation error")
+
+    assert not list(tmp_path.glob("*.mp4"))
 
 
 def test_download_direct_image_url_uses_response_content_type_without_yt_dlp(tmp_path: Path) -> None:

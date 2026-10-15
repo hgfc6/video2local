@@ -178,6 +178,28 @@ def test_main_controller_can_open_downloads_directory() -> None:
     assert controller.status_text == "已打开下载目录"
 
 
+def test_main_controller_sets_collision_policy_and_generates_diagnostics() -> None:
+    @dataclass
+    class DiagnosticsEngine:
+        collision_policy: str = "skip"
+
+        def set_collision_policy(self, policy: str) -> None:
+            self.collision_policy = policy
+
+        def build_diagnostics(self) -> str:
+            return "Video2Local 诊断信息"
+
+    engine = DiagnosticsEngine()
+    controller = MainController(engine=engine)
+
+    controller.set_collision_policy("timestamp")
+    controller.copy_diagnostics()
+
+    assert engine.collision_policy == "timestamp"
+    assert controller.diagnostics_text == "Video2Local 诊断信息"
+    assert controller.status_text == "诊断信息已生成"
+
+
 def test_main_controller_can_show_latest_sync_summary() -> None:
     engine = FakeEngine()
     controller = MainController(engine=engine)

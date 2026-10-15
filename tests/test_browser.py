@@ -224,6 +224,41 @@ def test_find_kukutool_page_requires_the_visible_parse_button() -> None:
     assert selected is form_page
 
 
+def test_kukutool_page_lookup_waits_for_client_side_parse_button() -> None:
+    class FakeLocator:
+        def __init__(self, page) -> None:
+            self._page = page
+
+        async def count(self) -> int:
+            return 1 if self._page.wait_count else 0
+
+    class FakePage:
+        url = "https://dy.kukutool.com/"
+
+        def __init__(self) -> None:
+            self.wait_count = 0
+
+        def get_by_role(self, role: str, name: str):
+            return FakeLocator(self)
+
+        async def wait_for_timeout(self, timeout_ms: int) -> None:
+            self.wait_count += 1
+
+    page = FakePage()
+    browser = type("FakeBrowser", (), {"contexts": [type("FakeContext", (), {"pages": [page]})()]})()
+
+    selected = asyncio.run(
+        KukutoolSession()._wait_for_kukutool_page_ready(
+            browser,
+            base_url="https://dy.kukutool.com/",
+            timeout_seconds=1,
+        )
+    )
+
+    assert selected is page
+    assert page.wait_count == 1
+
+
 def test_kukutool_result_wait_expression_matches_downloadable_quality_buttons() -> None:
     expression = KukutoolSession._quality_result_wait_expression()
 
@@ -277,6 +312,7 @@ def test_kukutool_page_check_rejects_ad_navigation() -> None:
     assert KukutoolSession._is_kukutool_page(base_url, base_url) is True
     assert KukutoolSession._is_kukutool_page("https://googleads.g.doubleclick.net/pagead/ad", base_url) is False
     assert KukutoolSession._is_google_vignette("https://dy.kukutool.com/#google_vignette") is True
+    assert KukutoolSession._is_kukutool_page("https://DY.KUKUTOOL.COM/en/", base_url) is True
 
 
 def test_kukutool_page_lookup_keeps_same_origin_vignette_for_gate_handling() -> None:

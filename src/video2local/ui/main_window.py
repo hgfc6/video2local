@@ -1,6 +1,7 @@
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractScrollArea,
+    QApplication,
     QButtonGroup,
     QFileDialog,
     QFrame,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
     QCheckBox,
+    QComboBox,
 )
 
 from video2local.ui.controller import MainController
@@ -175,6 +177,11 @@ class MainWindow(QMainWindow):
         self.limit_input.setPlaceholderText("全部")
         self.retry_input = QLineEdit(self.controller.retry_count_text)
         self.retry_input.setPlaceholderText("1")
+        self.collision_combo = QComboBox()
+        self.collision_combo.addItem("已存在时跳过", "skip")
+        self.collision_combo.addItem("已存在时覆盖", "overwrite")
+        self.collision_combo.addItem("自动追加时间戳", "timestamp")
+        self.collision_combo.setCurrentIndex(max(0, self.collision_combo.findData(self.controller.collision_policy)))
         self.native_resolver_checkbox = QCheckBox("原生解析")
         self.native_resolver_checkbox.setChecked("native" in self.controller.resolver_sources)
         self.kukutool_resolver_checkbox = QCheckBox("Kukutool")
@@ -212,6 +219,9 @@ class MainWindow(QMainWindow):
         self.summary_button = QPushButton("查看最近摘要")
         self.summary_button.setObjectName("secondaryButton")
         self.summary_button.clicked.connect(self.handle_summary)
+        self.diagnostics_button = QPushButton("复制诊断信息")
+        self.diagnostics_button.setObjectName("secondaryButton")
+        self.diagnostics_button.clicked.connect(self.handle_copy_diagnostics)
         self.preview_button = QPushButton("同步前预览")
         self.preview_button.setObjectName("secondaryButton")
         self.preview_button.clicked.connect(self.handle_preview_sync)
@@ -267,8 +277,10 @@ class MainWindow(QMainWindow):
         settings_layout.addWidget(self.limit_input, 0, 1)
         settings_layout.addWidget(QLabel("失败重试"), 1, 0)
         settings_layout.addWidget(self.retry_input, 1, 1)
+        settings_layout.addWidget(QLabel("同名文件"), 2, 0)
+        settings_layout.addWidget(self.collision_combo, 2, 1)
         self.resolver_label = QLabel("抖音解析来源")
-        settings_layout.addWidget(self.resolver_label, 2, 0, 1, 2)
+        settings_layout.addWidget(self.resolver_label, 3, 0, 1, 2)
         resolver_row = QHBoxLayout()
         resolver_row.setSpacing(12)
         resolver_row.addWidget(self.native_resolver_checkbox)
@@ -277,11 +289,11 @@ class MainWindow(QMainWindow):
         resolver_row.addStretch(1)
         self.resolver_widget = QWidget()
         self.resolver_widget.setLayout(resolver_row)
-        settings_layout.addWidget(self.resolver_widget, 3, 0, 1, 2)
+        settings_layout.addWidget(self.resolver_widget, 4, 0, 1, 2)
         self.bilibili_resolver_hint = QLabel("Bilibili 固定使用原生解析和登录 cookies")
         self.bilibili_resolver_hint.setObjectName("sectionHint")
         self.bilibili_resolver_hint.setVisible(False)
-        settings_layout.addWidget(self.bilibili_resolver_hint, 4, 0, 1, 2)
+        settings_layout.addWidget(self.bilibili_resolver_hint, 5, 0, 1, 2)
         settings_group.setLayout(settings_layout)
 
         self.sync_group = QGroupBox("批量同步")
@@ -377,6 +389,7 @@ class MainWindow(QMainWindow):
         status_layout.addWidget(self.summary_label, 2)
         status_layout.addWidget(self.open_downloads_button)
         status_layout.addWidget(self.summary_button)
+        status_layout.addWidget(self.diagnostics_button)
         status_bar.setLayout(status_layout)
 
         layout = QVBoxLayout()
@@ -479,6 +492,12 @@ class MainWindow(QMainWindow):
         self.controller.show_latest_summary()
         self.refresh_labels()
 
+    def handle_copy_diagnostics(self) -> None:
+        self.controller.copy_diagnostics()
+        if self.controller.diagnostics_text:
+            QApplication.clipboard().setText(self.controller.diagnostics_text)
+        self.refresh_labels()
+
     def handle_choose_output_dir(self) -> None:
         selected_dir = QFileDialog.getExistingDirectory(self, "选择下载输出目录", self.output_dir_input.text())
         if not selected_dir:
@@ -494,6 +513,7 @@ class MainWindow(QMainWindow):
             self.controller.set_flat_output(self.flat_output_checkbox.isChecked())
             self.controller.set_sync_limit(self.limit_input.text())
             self.controller.set_retry_count(self.retry_input.text())
+            self.controller.set_collision_policy(str(self.collision_combo.currentData()))
             if self.controller.platform_mode == "douyin":
                 resolver_sources: list[str] = []
                 if self.native_resolver_checkbox.isChecked():

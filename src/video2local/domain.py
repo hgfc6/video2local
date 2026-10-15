@@ -32,6 +32,10 @@ class VideoMetadata:
     format_selector: str | None = None
     author_handle: str | None = None
     media_type: str | None = None
+    expected_file_size: int | None = None
+    selected_provider_id: str | None = None
+    selected_quality_label: str | None = None
+    selected_file_size: int | None = None
 
 
 @dataclass(frozen=True)

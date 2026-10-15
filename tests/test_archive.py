@@ -99,6 +99,6 @@ def test_build_target_path_can_flatten_into_selected_root(tmp_path: Path) -> Non
         download_url="https://www.douyin.com/video/abc123",
     )
 
-    expected = tmp_path / "演示标题-abc123.mp4"
+    expected = tmp_path / "作者A-演示标题-abc123.mp4"
 
     assert manager.build_target_path(metadata, "mp4") == expected

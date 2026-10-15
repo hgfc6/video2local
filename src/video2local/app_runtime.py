@@ -1,11 +1,13 @@
 from dataclasses import dataclass
 from dataclasses import replace
+from datetime import datetime
 from html import unescape
 import os
 from pathlib import Path
 import re
 import subprocess
 import time
+from typing import Callable
 
 from video2local.archive import ArchiveManager
 from video2local.adapters.base import SourceDescriptor
@@ -41,8 +43,11 @@ class AppRuntime:
         self.flat_output = False
         self._latest_sync_run: dict | None = None
         self._douyin_card_hints: dict[str, tuple[str, str]] = {}
+        self.last_resolution_diagnostics: dict[str, object] = {}
+        self.collision_policy = "skip"
         self.archive_manager = ArchiveManager(self.settings.paths.downloads_dir)
         self.downloader = YtDlpService()
+        self.downloader.archive_manager = self.archive_manager
         self.sync_engine = SyncEngine(
             repository=None,
             downloader=self.downloader,
@@ -61,6 +66,12 @@ class AppRuntime:
     def set_flat_output(self, enabled: bool) -> None:
         self.flat_output = enabled
         self.archive_manager.flatten_into_root = enabled
+
+    def set_collision_policy(self, policy: str) -> None:
+        if policy not in {"skip", "overwrite", "timestamp"}:
+            raise ValueError("不支持的同名文件处理方式")
+        self.collision_policy = policy
+        self.sync_engine.set_collision_policy(policy)
 
     def set_sync_limit(self, limit: int | None) -> None:
         self.sync_limit = None if limit is None or limit <= 0 else limit
@@ -280,6 +291,42 @@ class AppRuntime:
         self.ensure_directories()
         return self._latest_sync_run
 
+    def build_diagnostics(self) -> str:
+        """Return shareable state only; do not include cookies or signed download URLs."""
+        lines = [
+            "Video2Local 诊断信息",
+            f"生成时间: {datetime.now().isoformat(timespec='seconds')}",
+            f"当前工作台: {self.active_platform or '-'}",
+            f"输出目录: {self.output_root}",
+            f"平铺输出: {'是' if self.flat_output else '否'}",
+            f"同名文件处理: {self.collision_policy}",
+            f"抖音解析来源: {', '.join(self.resolver_sources) or '-'}",
+        ]
+        if self.last_activity is not None:
+            lines.append(f"当前活动: {self.last_activity.operation} / {self.last_activity.stage}")
+            lines.append(f"当前链接: {self.last_activity.current_url or '-'}")
+        if self.last_progress is not None:
+            lines.append(
+                "最近同步进度: "
+                f"处理 {self.last_progress.processed_count}/{self.last_progress.discovered_count}，"
+                f"下载 {self.last_progress.downloaded_count}，失败 {self.last_progress.failed_count}"
+            )
+        resolution = self.last_resolution_diagnostics
+        if resolution:
+            lines.append(f"最近解析页面: {resolution.get('page_url', '-')}")
+            lines.append(f"最近解析来源: {' + '.join(resolution.get('sources', [])) or '-'}")
+            lines.append(f"最近解析版本数: {resolution.get('variant_count', 0)}")
+            errors = resolution.get("errors", [])
+            lines.append(f"最近解析错误: {'；'.join(errors) if errors else '-'}")
+        try:
+            page_urls = self.browser_session.list_page_urls()
+            lines.append(f"专用 Chrome 页面数: {len(page_urls)}")
+            kukutool_host = self.settings.share_resolvers.kukutool_base_url.split("//", 1)[-1].split("/", 1)[0]
+            lines.append(f"Kukutool 页面: {'已检测到' if any(kukutool_host in url for url in page_urls) else '未检测到'}")
+        except Exception as exc:
+            lines.append(f"专用 Chrome 状态: 未连接 ({exc})")
+        return "\n".join(lines)
+
     def open_downloads_dir(self) -> None:
         self.ensure_directories()
         os.startfile(str(self.output_root))
@@ -288,6 +335,7 @@ class AppRuntime:
         self.ensure_directories()
         self._clear_download_stop_request()
         source = self.get_current_source()
+        cookies_path = self.browser_session.export_cookies(self.settings.paths.data_dir / "yt-dlp-cookies.txt")
         candidate_urls: list[str] = []
         seen_urls: set[str] = set()
         for url in self._collect_candidate_urls(source):
@@ -298,27 +346,28 @@ class AppRuntime:
             raise RuntimeError("当前页面未发现可下载视频，请确认已登录，并等待作品或收藏列表加载完成后再试。")
 
         first_url = candidate_urls[0]
-        if source.platform == "douyin":
-            detail_payload = self.browser_session.fetch_douyin_aweme_detail(first_url)
-            metadata = self.adapter.parse_aweme_detail(
-                detail_payload,
-                source_type=source.source_type,
-                page_url=first_url,
-            )
-        else:
-            cookies_path = self.browser_session.export_cookies(self.settings.paths.data_dir / "yt-dlp-cookies.txt")
-            metadata = self._build_preview_item(
-                page_url=first_url,
-                source=source,
-                cookies_path=cookies_path,
-            ).metadata
+        preview_item = self._build_preview_item(
+            page_url=first_url,
+            source=source,
+            cookies_path=cookies_path,
+        )
+        selected_variants = self._select_sync_variants(
+            preview_item.variants,
+            page_url=preview_item.metadata.page_url,
+        )
+        selected_variant = selected_variants[0] if selected_variants else None
+        metadata = (
+            self._metadata_for_variant(preview_item.metadata, selected_variant)
+            if selected_variant is not None
+            else preview_item.metadata
+        )
 
         target_dir = self.output_root / "_smoke_test"
         target_dir.mkdir(parents=True, exist_ok=True)
-        _, local_path = self.downloader.download(
+        _, local_path = self._download_with_collision(
             metadata,
             target_dir,
-            cookies_file=cookies_path if source.platform != "douyin" else None,
+            cookies_file=cookies_path,
         )
         return SampleDownloadResult(metadata=metadata, local_path=local_path)
 
@@ -330,83 +379,13 @@ class AppRuntime:
         return self._parse_douyin_share_text(share_url)
 
     def _parse_douyin_share_text(self, share_url: str) -> ShareParseResult:
-        metadata: VideoMetadata | None = None
-        canonical_url = share_url
-        provider_labels: list[str] = []
-        variants: list[VideoVariant] = []
-        resolver_errors: list[Exception] = []
-        native_resolution = None
-        native_is_image_post = False
-
-        if self._requires_native_douyin_detail():
-            try:
-                native_resolution = self._resolve_provider("native", share_url, attempts=1)
-                canonical_url = native_resolution.canonical_url
-                metadata = self.adapter.parse_aweme_detail(
-                    native_resolution.payload,
-                    source_type=SourceType.SHARE_LINK,
-                    page_url=canonical_url,
-                )
-                native_variants = self.adapter.parse_share_variants(native_resolution.payload)
-                native_is_image_post = self._contains_image_variants(native_variants)
-                if "native" in self.resolver_sources:
-                    variants.extend(
-                        self._tag_variants(
-                            native_variants,
-                            "native",
-                        )
-                    )
-                    provider_labels.append("native")
-            except Exception as exc:
-                resolver_errors.append(exc)
-                if "native" in self.resolver_sources:
-                    provider_labels.append("native(失败)")
-
-        if "cdn" in self.resolver_sources and not native_is_image_post:
-            try:
-                if native_resolution is None:
-                    raise RuntimeError("CDN 解析需要可用的抖音原生详情")
-                variants.extend(
-                    self._tag_variants(
-                        self._cdn_resolver().resolve_variants_from_payload(native_resolution.payload),
-                        "cdn",
-                    )
-                )
-                provider_labels.append("cdn")
-            except Exception as exc:
-                resolver_errors.append(exc)
-                provider_labels.append("cdn(失败)")
-
-        if self._is_kukutool_enabled() and not native_is_image_post:
-            try:
-                kukutool_resolution = self._resolve_provider(
-                    "kukutool", share_url, attempts=1, variants_only=True
-                )
-                if metadata is None:
-                    canonical_url = kukutool_resolution.canonical_url
-                    metadata = self.adapter.parse_aweme_detail(
-                        kukutool_resolution.payload,
-                        source_type=SourceType.SHARE_LINK,
-                        page_url=canonical_url,
-                    )
-                kukutool_video = (kukutool_resolution.payload.get("aweme_detail") or {}).get("video") or {}
-                variants.extend(
-                    self._tag_variants(self.adapter._build_kukutool_variants(kukutool_video), "kukutool")
-                )
-                provider_labels.append("kukutool")
-            except Exception as exc:
-                resolver_errors.append(exc)
-                provider_labels.append("kukutool(失败)")
-
-        if metadata is None:
-            self._raise_douyin_resolution_error(resolver_errors)
-        variants = self._merge_sync_variants(variants)
-        if not variants:
-            self._raise_douyin_resolution_error(resolver_errors, fallback="未解析到可下载版本")
-        variants = self._merge_sync_variants(self._probe_missing_variant_sizes(variants))
-        variants = self._mark_recommended_variant(variants)
+        canonical_url, metadata, provider_summary, variants = self._resolve_douyin_variants(
+            page_url=share_url,
+            source_type=SourceType.SHARE_LINK,
+            native_detail_loader=lambda: self._load_native_douyin_share_detail(share_url),
+        )
         return ShareParseResult(
-            provider_id=" + ".join(provider_labels),
+            provider_id=provider_summary,
             source_url=share_url,
             canonical_url=canonical_url,
             metadata=metadata,
@@ -423,7 +402,7 @@ class AppRuntime:
         variant = next((item for item in parse_result.variants if item.variant_id == variant_id), None)
         if variant is None:
             raise RuntimeError(f"未找到要下载的清晰度版本: {variant_id}")
-        metadata = replace(parse_result.metadata, download_url=variant.download_url)
+        metadata = self._metadata_for_variant(parse_result.metadata, variant)
         if self.flat_output:
             target_dir = self.output_root
         else:
@@ -438,21 +417,21 @@ class AppRuntime:
             local_paths: list[str] = []
             for index, image_variant in enumerate(image_variants, start=1):
                 image_metadata = replace(
-                    metadata,
+                    self._metadata_for_variant(metadata, image_variant),
                     video_id=f"{metadata.video_id}-{index:03d}",
-                    download_url=image_variant.download_url,
                     media_type="live_photo" if "实况图" in image_variant.quality_label else "image",
                 )
-                _, local_path = self.downloader.download(image_metadata, target_dir)
+                _, local_path = self._download_with_collision(image_metadata, target_dir)
                 local_paths.append(local_path)
             local_path = "; ".join(local_paths)
         else:
             filename_stem = self.archive_manager.build_filename_stem(
                 video_id=metadata.video_id,
                 title=metadata.title,
+                author_name=metadata.author_name,
                 suffix=variant.quality_label,
             )
-            _, local_path = self.downloader.download(
+            _, local_path = self._download_with_collision(
                 metadata,
                 target_dir,
                 cookies_file=self._export_browser_cookies() if metadata.platform == "bilibili" else None,
@@ -501,6 +480,37 @@ class AppRuntime:
         clear_stop_request = getattr(self.downloader, "clear_stop_request", None)
         if clear_stop_request is not None:
             clear_stop_request()
+
+    def _download_with_collision(
+        self,
+        metadata: VideoMetadata,
+        target_dir: Path,
+        *,
+        cookies_file: Path | None = None,
+        filename_stem: str | None = None,
+        format_selector: str | None = None,
+    ) -> tuple[str, str]:
+        stem = filename_stem or self.archive_manager.build_filename_stem(
+            video_id=metadata.video_id,
+            title=metadata.title,
+            author_name=metadata.author_name,
+        )
+        existing_paths = self.archive_manager.find_existing_paths(target_dir, stem)
+        if existing_paths and self.collision_policy == "skip":
+            existing_path = existing_paths[0]
+            return existing_path.suffix.lstrip("."), str(existing_path)
+        if existing_paths and self.collision_policy == "overwrite":
+            for existing_path in existing_paths:
+                existing_path.unlink()
+        if existing_paths and self.collision_policy == "timestamp":
+            stem = self.archive_manager.timestamped_filename_stem(stem)
+        return self.downloader.download(
+            metadata,
+            target_dir,
+            cookies_file=cookies_file,
+            filename_stem=stem,
+            format_selector=format_selector,
+        )
 
     def _export_bilibili_cookies(self) -> Path | None:
         """Backward-compatible name retained for callers outside the runtime."""
@@ -576,18 +586,12 @@ class AppRuntime:
                         image_ordinal += 1
                         media_type = "live_photo" if "实况图" in variant.quality_label else "image"
                         metadata = replace(
-                            metadata,
+                            self._metadata_for_variant(metadata, variant),
                             video_id=f"{metadata.video_id}-{image_ordinal:03d}",
-                            download_url=variant.download_url,
-                            format_selector=variant.format_selector,
                             media_type=media_type,
                         )
                     else:
-                        metadata = replace(
-                            metadata,
-                            download_url=variant.download_url,
-                            format_selector=variant.format_selector,
-                        )
+                        metadata = self._metadata_for_variant(metadata, variant)
                 else:
                     media_key = (metadata.platform, metadata.video_id, metadata.download_url)
                     if media_key in seen_media_keys:
@@ -779,7 +783,51 @@ class AppRuntime:
         kukutool_variant_limit: int | None = None,
         include_variants: bool = False,
     ) -> tuple[VideoMetadata, str, str, VideoVariant | None] | tuple[VideoMetadata, str, str, VideoVariant | None, list[VideoVariant]]:
+        canonical_url, metadata, provider_summary, merged_variants = self._resolve_douyin_variants(
+            page_url=page_url,
+            source_type=source_type,
+            native_detail_loader=lambda: (
+                page_url,
+                self.browser_session.fetch_douyin_aweme_detail(page_url),
+            ),
+            fallback_metadata_loader=lambda: self.downloader.probe_metadata(
+                url=page_url,
+                platform="douyin",
+                source_type=source_type,
+                cookies_from_browser="chrome",
+                cookies_file=cookies_path,
+            ),
+            kukutool_resolution=kukutool_resolution,
+            kukutool_variant_limit=kukutool_variant_limit,
+            allow_metadata_without_variants=True,
+        )
+        metadata = self._apply_douyin_card_hint(metadata, page_url)
+        selected_variant = self._select_sync_variant(merged_variants)
+        if selected_variant is not None:
+            metadata = self._metadata_for_variant(metadata, selected_variant)
+        variant_summary = self._build_variant_summary(merged_variants)
+        if include_variants:
+            return metadata, provider_summary, variant_summary, selected_variant, merged_variants
+        return metadata, provider_summary, variant_summary, selected_variant
+
+    def _load_native_douyin_share_detail(self, share_url: str) -> tuple[str, dict]:
+        resolution = self._resolve_provider("native", share_url, attempts=1)
+        return resolution.canonical_url, resolution.payload
+
+    def _resolve_douyin_variants(
+        self,
+        *,
+        page_url: str,
+        source_type: SourceType,
+        native_detail_loader: Callable[[], tuple[str, dict]] | None,
+        fallback_metadata_loader: Callable[[], VideoMetadata] | None = None,
+        kukutool_resolution: object | None = None,
+        kukutool_variant_limit: int | None = None,
+        allow_metadata_without_variants: bool = False,
+    ) -> tuple[str, VideoMetadata, str, list[VideoVariant]]:
+        """Resolve selected Douyin sources once for both share links and batch items."""
         metadata: VideoMetadata | None = None
+        canonical_url = page_url
         provider_labels: list[str] = []
         merged_variants: list[VideoVariant] = []
         resolver_errors: list[Exception] = []
@@ -788,33 +836,26 @@ class AppRuntime:
 
         if self._requires_native_douyin_detail():
             try:
-                native_detail_payload = self.browser_session.fetch_douyin_aweme_detail(page_url)
-                native_metadata = self.adapter.parse_aweme_detail(
+                if native_detail_loader is None:
+                    raise RuntimeError("抖音原生详情加载器不可用")
+                canonical_url, native_detail_payload = native_detail_loader()
+                metadata = self.adapter.parse_aweme_detail(
                     native_detail_payload,
                     source_type=source_type,
-                    page_url=page_url,
+                    page_url=canonical_url,
                 )
-                metadata = native_metadata
                 native_variants = self.adapter.parse_share_variants(native_detail_payload)
                 native_is_image_post = self._contains_image_variants(native_variants)
-                if "native" in self.resolver_sources:
-                    merged_variants.extend(
-                        self._tag_variants(native_variants, "native")
-                    )
-                    provider_labels.append("native")
+                if "native" in self.resolver_sources or native_is_image_post:
+                    merged_variants.extend(self._tag_variants(native_variants, "native"))
+                    provider_labels.append("native" if "native" in self.resolver_sources else "native(图集回退)")
             except Exception as exc:
                 resolver_errors.append(exc)
                 if "native" in self.resolver_sources:
                     provider_labels.append("native(失败)")
-                if metadata is None:
+                if metadata is None and fallback_metadata_loader is not None:
                     try:
-                        metadata = self.downloader.probe_metadata(
-                            url=page_url,
-                            platform="douyin",
-                            source_type=source_type,
-                            cookies_from_browser="chrome",
-                            cookies_file=cookies_path,
-                        )
+                        metadata = fallback_metadata_loader()
                     except Exception as fallback_exc:
                         resolver_errors.append(fallback_exc)
 
@@ -841,10 +882,11 @@ class AppRuntime:
                     "kukutool", page_url, attempts=1, variants_only=True
                 )
                 if metadata is None:
+                    canonical_url = resolution.canonical_url
                     metadata = self.adapter.parse_aweme_detail(
                         resolution.payload,
                         source_type=source_type,
-                        page_url=resolution.canonical_url,
+                        page_url=canonical_url,
                     )
                 kukutool_video = (resolution.payload.get("aweme_detail") or {}).get("video") or {}
                 kukutool_variants = self._limit_kukutool_preview_variants(
@@ -858,17 +900,21 @@ class AppRuntime:
                 provider_labels.append("kukutool(失败)")
         if metadata is None:
             self._raise_douyin_resolution_error(resolver_errors)
-
-        metadata = self._apply_douyin_card_hint(metadata, page_url)
         merged_variants = self._merge_sync_variants(merged_variants)
-        selected_variant = self._select_sync_variant(merged_variants)
-        if selected_variant is not None:
-            metadata = replace(metadata, download_url=selected_variant.download_url)
+        if not merged_variants and not allow_metadata_without_variants:
+            self._raise_douyin_resolution_error(resolver_errors, fallback="未解析到可下载版本")
+        if merged_variants:
+            merged_variants = self._merge_sync_variants(self._probe_missing_variant_sizes(merged_variants))
+            merged_variants = self._mark_recommended_variant(merged_variants)
         provider_summary = " + ".join(provider_labels) if provider_labels else "native"
-        variant_summary = self._build_variant_summary(merged_variants)
-        if include_variants:
-            return metadata, provider_summary, variant_summary, selected_variant, merged_variants
-        return metadata, provider_summary, variant_summary, selected_variant
+        self.last_resolution_diagnostics = {
+            "page_url": page_url,
+            "canonical_url": canonical_url,
+            "sources": provider_labels,
+            "errors": [str(error) for error in resolver_errors],
+            "variant_count": len(merged_variants),
+        }
+        return canonical_url, metadata, provider_summary, merged_variants
 
     def _resolve_provider(
         self,
@@ -992,6 +1038,18 @@ class AppRuntime:
                 item.height or 0,
                 item.width or 0,
             ),
+        )
+
+    @staticmethod
+    def _metadata_for_variant(metadata: VideoMetadata, variant: VideoVariant) -> VideoMetadata:
+        return replace(
+            metadata,
+            download_url=variant.download_url,
+            format_selector=variant.format_selector,
+            expected_file_size=variant.file_size if variant.provider_id == "cdn" else None,
+            selected_provider_id=variant.provider_id,
+            selected_quality_label=variant.quality_label,
+            selected_file_size=variant.file_size,
         )
 
     @staticmethod

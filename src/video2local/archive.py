@@ -1,5 +1,6 @@
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from video2local.domain import VideoMetadata
@@ -39,6 +40,7 @@ class ArchiveManager:
         *,
         video_id: str,
         title: str | None,
+        author_name: str | None = None,
         suffix: str | None = None,
     ) -> str:
         safe_video_id = self.safe_name(video_id)
@@ -46,6 +48,8 @@ class ArchiveManager:
         parts = [safe_title, safe_video_id]
         if suffix:
             parts.append(self.safe_name(suffix))
+        if self.flatten_into_root and author_name:
+            parts.insert(0, self.safe_name(author_name))
         return "-".join(parts)
 
     def normalize_extension(self, raw: str) -> str:
@@ -61,9 +65,22 @@ class ArchiveManager:
 
     def build_target_path(self, metadata: VideoMetadata, file_ext: str) -> Path:
         extension = self.normalize_extension(file_ext)
-        filename = f"{self.build_filename_stem(video_id=metadata.video_id, title=metadata.title)}.{extension}"
+        stem = self.build_filename_stem(
+            video_id=metadata.video_id,
+            title=metadata.title,
+            author_name=metadata.author_name,
+        )
+        filename = f"{stem}.{extension}"
         if self.flatten_into_root:
             return self.download_root / filename
         platform = self.safe_name(metadata.platform)
         author = self.build_author_directory_name(metadata)
         return self.download_root / platform / author / filename
+
+    @staticmethod
+    def find_existing_paths(target_dir: Path, filename_stem: str) -> list[Path]:
+        return [path for path in target_dir.glob(f"{filename_stem}.*") if path.is_file()]
+
+    @staticmethod
+    def timestamped_filename_stem(filename_stem: str) -> str:
+        return f"{filename_stem}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
