@@ -35,10 +35,10 @@ KUKUTOOL_FILE_SIZE_RE = re.compile(
 KUKUTOOL_FILE_SIZE_LABEL_RE = re.compile(r"文件大小|File size", re.IGNORECASE)
 KUKUTOOL_BARE_FILE_SIZE_RE = re.compile(r"(?P<size>[\d.]+)\s*(?P<unit>KB|MB|GB)", re.IGNORECASE)
 KUKUTOOL_RESOLUTION_RE = re.compile(r"(?P<width>\d{3,5})\s*[×xX]\s*(?P<height>\d{3,5})")
-KUKUTOOL_MORE_SIZES_DIALOG_TITLE_RE = re.compile(r"更多大小|More sizes", re.IGNORECASE)
+KUKUTOOL_MORE_SIZES_DIALOG_TITLE_RE = re.compile(r"超高清HD|More sizes", re.IGNORECASE)
 KUKUTOOL_PARSE_BUTTON_RE = re.compile(r"^(开始解析|Parse Video)$", re.IGNORECASE)
 KUKUTOOL_CLEAR_BUTTON_RE = re.compile(r"^(清除内容|Clear)$", re.IGNORECASE)
-KUKUTOOL_MORE_SIZES_BUTTON_RE = re.compile(r"^(更多大小|More sizes)(?:\s*\(.+\))?$", re.IGNORECASE)
+KUKUTOOL_MORE_SIZES_BUTTON_RE = re.compile(r"^(超高清HD|More sizes)(?:\s*\(.+\))?$", re.IGNORECASE)
 KUKUTOOL_COPY_LINK_BUTTON_RE = re.compile(r"^(?:复制(?:下载)?链接|复制|Copy(?:\s+(?:link|URL))?)$", re.IGNORECASE)
 KUKUTOOL_NOTICE_DISMISS_BUTTON_RE = re.compile(
     r"7天内不[在再]提示|Don't show again(?: for)? 7 days", re.IGNORECASE
@@ -832,7 +832,7 @@ class KukutoolSession(DouyinPublicSession):
         size = cls._parse_file_size(text)
         resolution = KUKUTOOL_RESOLUTION_RE.search(text)
         if resolution is None:
-            label = "更多大小" if index == 0 else f"更多大小 {index + 1}"
+            label = "超高清HD" if index == 0 else f"超高清HD {index + 1}"
         else:
             label = f"{min(int(resolution.group('width')), int(resolution.group('height')))}p"
         entry = {"type": label}
