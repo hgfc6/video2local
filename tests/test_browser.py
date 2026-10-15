@@ -240,6 +240,8 @@ def test_kukutool_more_sizes_controls_support_chinese_and_english_labels() -> No
     assert KUKUTOOL_CAPTCHA_TEXT_RE.search("为什么需要验证码？")
     assert KUKUTOOL_FILE_SIZE_LABEL_RE.search("File size")
     assert KUKUTOOL_MORE_SIZES_BUTTON_RE.search("More sizes (HD)")
+    assert KUKUTOOL_MORE_SIZES_BUTTON_RE.search("更多大小")
+    assert KUKUTOOL_MORE_SIZES_BUTTON_RE.search("超高清HD")
     assert KUKUTOOL_COPY_LINK_BUTTON_RE.search("Copy URL")
     assert KUKUTOOL_COPY_LINK_BUTTON_RE.search("复制下载链接")
     assert KUKUTOOL_COPY_LINK_BUTTON_RE.search("复制")

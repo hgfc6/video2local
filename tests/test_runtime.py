@@ -866,7 +866,7 @@ def test_preview_sync_returns_merged_variant_summary(tmp_path: Path) -> None:
                 with patch.object(
                     kukutool_resolver_for(runtime),
                     "resolve_variants_only_many",
-                    side_effect=lambda urls: {url: fake_resolve(url) for url in urls},
+                    side_effect=lambda urls, progress_callback=None: {url: fake_resolve(url) for url in urls},
                 ):
                     with patch(
                         "video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail",
@@ -928,7 +928,7 @@ def test_preview_sync_resolves_every_video_with_kukutool_directly(tmp_path: Path
                 with patch.object(
                     kukutool_resolver,
                     "resolve_variants_only_many",
-                    side_effect=lambda urls: {url: fake_kukutool_resolve(url) for url in urls},
+                    side_effect=lambda urls, progress_callback=None: {url: fake_kukutool_resolve(url) for url in urls},
                 ) as resolve_many_mock:
                     with patch("video2local.app_runtime.ChromeRemoteSession.fetch_douyin_aweme_detail") as native_mock:
                         preview = runtime.preview_sync()
@@ -1455,7 +1455,9 @@ def test_kukutool_preview_ignores_native_note_candidates(tmp_path: Path) -> None
         )
 
     assert list(result) == [video_url]
-    resolve_mock.assert_called_once_with([video_url])
+    resolve_mock.assert_called_once()
+    assert resolve_mock.call_args.args == ([video_url],)
+    assert callable(resolve_mock.call_args.kwargs["progress_callback"])
 
 
 def test_parse_share_text_prefers_signed_web_api_variants_when_available(tmp_path: Path) -> None:

@@ -192,12 +192,6 @@ class SyncEngine:
             report_path=report_path,
         )
 
-    def _safe_file_size(self, local_path: str) -> int | None:
-        try:
-            return Path(local_path).stat().st_size
-        except OSError:
-            return None
-
     def write_skipped_items_report(self, items: list[SkippedSyncItem], report_dir: Path) -> str | None:
         if not items:
             return None

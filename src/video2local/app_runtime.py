@@ -14,7 +14,7 @@ from video2local.adapters.douyin import DouyinAdapter
 from video2local.browser import ChromeLaunchSpec, ChromeRemoteSession, DouyinPublicSession, DouyinSignedSession, KukutoolSession
 from video2local.config import AppSettings
 from video2local.downloader import YtDlpService
-from video2local.domain import SampleDownloadResult, ShareParseResult, ShareVariantDownloadResult, SkippedSyncItem, SourceType, SyncPreviewItem, SyncPreviewResult, SyncProgress, SyncRunStatus, VideoMetadata, VideoVariant
+from video2local.domain import RuntimeActivity, SampleDownloadResult, ShareParseResult, ShareVariantDownloadResult, SkippedSyncItem, SourceType, SyncPreviewItem, SyncPreviewResult, SyncProgress, SyncRunStatus, VideoMetadata, VideoVariant
 from video2local.resolvers import CdnDouyinResolver, KukutoolResolver, NativeDouyinResolver, ResolverChain
 from video2local.sync_engine import SyncEngine, SyncSummary
 
@@ -32,6 +32,7 @@ class AppRuntime:
         self.resolver_sources = tuple(self.settings.share_resolvers.enabled_sources)
         self.share_resolver = self._build_share_resolver_chain()
         self.last_progress: SyncProgress | None = None
+        self.last_activity: RuntimeActivity | None = None
         self.output_root = self.settings.paths.downloads_dir
         self.output_root_selected = False
         self.sync_limit: int | None = None
@@ -141,10 +142,18 @@ class AppRuntime:
         return self.get_current_source()
 
     def start_sync(self) -> SyncSummary:
+        self._set_activity(operation="sync", stage="正在检查当前页面")
         source = self.get_current_source()
         try:
+            self._set_activity(operation="sync", stage="正在导出浏览器登录信息")
             cookies_path = self.browser_session.export_cookies(self.settings.paths.data_dir / "yt-dlp-cookies.txt")
+            self._set_activity(operation="sync", stage="正在扫描页面作品")
             candidate_urls = self._collect_candidate_urls(source)
+            self._set_activity(
+                operation="sync",
+                stage="已发现作品，准备逐条解析并下载",
+                total_count=len(candidate_urls),
+            )
             items = self._iter_sync_items(
                 source=source,
                 cookies_path=cookies_path,
@@ -179,9 +188,17 @@ class AppRuntime:
             raise
 
     def preview_sync(self) -> SyncPreviewResult:
+        self._set_activity(operation="preview", stage="正在检查当前页面")
         source = self.get_current_source()
+        self._set_activity(operation="preview", stage="正在导出浏览器登录信息")
         cookies_path = self.browser_session.export_cookies(self.settings.paths.data_dir / "yt-dlp-cookies.txt")
+        self._set_activity(operation="preview", stage="正在扫描页面作品")
         candidate_urls = self._collect_candidate_urls(source)
+        self._set_activity(
+            operation="preview",
+            stage="已发现作品，准备解析清晰度",
+            total_count=len(candidate_urls),
+        )
         kukutool_resolutions = (
             self._resolve_kukutool_preview_candidates(candidate_urls)
             if source.platform == "douyin"
@@ -190,7 +207,14 @@ class AppRuntime:
         items: list[SyncPreviewItem] = []
         skipped_items: list[SkippedSyncItem] = []
         seen_video_keys: set[tuple[str, str]] = set()
-        for url in candidate_urls:
+        for index, url in enumerate(candidate_urls, start=1):
+            self._set_activity(
+                operation="preview",
+                stage="正在解析作品元数据",
+                completed_count=index - 1,
+                total_count=len(candidate_urls),
+                current_url=url,
+            )
             try:
                 preview_item = self._build_preview_item(
                     page_url=url,
@@ -220,6 +244,9 @@ class AppRuntime:
             report_path=report_path,
         )
 
+    def clear_activity(self) -> None:
+        self.last_activity = None
+
     def _resolve_kukutool_preview_candidates(self, candidate_urls: list[str]) -> dict[str, object]:
         if not self._is_kukutool_enabled():
             return {}
@@ -235,7 +262,16 @@ class AppRuntime:
         video_urls = [url for url in candidate_urls if "/note/" not in url]
         if not video_urls:
             return {}
-        return resolver.resolve_variants_only_many(video_urls)
+        return resolver.resolve_variants_only_many(
+            video_urls,
+            progress_callback=lambda completed, total, url: self._set_activity(
+                operation="preview",
+                stage="正在通过 Kukutool 解析清晰度",
+                completed_count=completed,
+                total_count=total,
+                current_url=url,
+            ),
+        )
 
     def stop_sync(self) -> None:
         self.sync_engine.request_stop()
@@ -473,26 +509,26 @@ class AppRuntime:
     def _store_progress(self, progress: SyncProgress) -> None:
         self.last_progress = progress
 
-    def _build_sync_items(self, *, source: SourceDescriptor, cookies_path: Path) -> list[VideoMetadata]:
-        items: list[VideoMetadata] = []
-        seen_video_keys: set[tuple[str, str]] = set()
-        for url in self._collect_candidate_urls(source):
-            try:
-                preview_item = self._build_preview_item(
-                    page_url=url,
-                    source=source,
-                    cookies_path=cookies_path,
-                )
-            except Exception:
-                continue
-            video_key = (preview_item.metadata.platform, preview_item.metadata.video_id)
-            if video_key in seen_video_keys:
-                continue
-            seen_video_keys.add(video_key)
-            items.append(preview_item.metadata)
-        if not items:
-            raise RuntimeError("当前页面未发现可下载视频，请确认已登录，并等待作品或收藏列表加载完成后再试。")
-        return items
+    def _set_activity(
+        self,
+        *,
+        operation: str,
+        stage: str,
+        completed_count: int = 0,
+        total_count: int = 0,
+        current_url: str = "",
+        current_title: str | None = None,
+        current_author_name: str = "",
+    ) -> None:
+        self.last_activity = RuntimeActivity(
+            operation=operation,
+            stage=stage,
+            completed_count=completed_count,
+            total_count=total_count,
+            current_url=current_url,
+            current_title=current_title,
+            current_author_name=current_author_name,
+        )
 
     def _iter_sync_items(
         self,
@@ -503,7 +539,15 @@ class AppRuntime:
     ):
         seen_media_keys: set[tuple[str, str, str]] = set()
         yielded = 0
-        for url in candidate_urls:
+        total_count = len(candidate_urls)
+        for index, url in enumerate(candidate_urls, start=1):
+            self._set_activity(
+                operation="sync",
+                stage="正在解析作品元数据",
+                completed_count=index - 1,
+                total_count=total_count,
+                current_url=url,
+            )
             try:
                 preview_item = self._build_preview_item(
                     page_url=url,
@@ -550,6 +594,15 @@ class AppRuntime:
                         continue
                     seen_media_keys.add(media_key)
                 yielded += 1
+                self._set_activity(
+                    operation="sync",
+                    stage="正在下载所选最大版本",
+                    completed_count=index - 1,
+                    total_count=total_count,
+                    current_url=url,
+                    current_title=metadata.title,
+                    current_author_name=metadata.author_name,
+                )
                 yield metadata
         if yielded == 0:
             raise RuntimeError("当前页面未发现可下载视频，请确认已登录，并等待作品或收藏列表加载完成后再试。")
@@ -926,12 +979,6 @@ class AppRuntime:
         if "cdn" in self.resolver_sources:
             resolvers.append(CdnDouyinResolver(settings=self.settings))
         return ResolverChain(resolvers)
-
-    def _safe_file_size(self, local_path: str) -> int | None:
-        try:
-            return Path(local_path).stat().st_size
-        except OSError:
-            return None
 
     def _select_sync_variant(self, variants: list[VideoVariant]) -> VideoVariant | None:
         if not variants:

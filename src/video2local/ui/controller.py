@@ -57,6 +57,7 @@ class MainController:
             self.status_text = "同步进行中"
             self.detail_text = "当前任务尚未结束"
             return
+        self._clear_runtime_activity()
         self.status_text = "同步进行中"
         self.detail_text = "正在准备同步任务"
         self._worker = Thread(target=self._run_sync, daemon=True)
@@ -68,6 +69,7 @@ class MainController:
             self.status_text = "同步进行中"
             self.detail_text = "请等待当前任务结束后再预览"
             return
+        self._clear_runtime_activity()
         self.status_text = "正在生成预览"
         self.detail_text = "正在扫描页面并解析预计下载版本"
         self._worker = Thread(target=self._run_sync_preview, daemon=True)
@@ -91,6 +93,7 @@ class MainController:
             self.status_text = "同步进行中"
             self.detail_text = "请等待当前任务结束后再执行样本下载"
             return
+        self._clear_runtime_activity()
         self.status_text = "正在下载样本"
         self.detail_text = "将下载当前页面首个可见视频到 _smoke_test 目录"
         self._worker = Thread(target=self._run_sample_download, daemon=True)
@@ -108,6 +111,7 @@ class MainController:
             self.status_text = f"错误: 当前为{self._platform_name()}工作台"
             self.detail_text = f"该链接属于 {selected_name}，请先切换平台工作台"
             return
+        self._clear_runtime_activity()
         self.status_text = "正在解析分享链接"
         self.detail_text = "正在提取链接并加载可用清晰度版本"
         self._worker = Thread(target=self._run_share_parse, args=(raw_text,), daemon=True)
@@ -123,6 +127,7 @@ class MainController:
             self.status_text = "错误: 尚未解析分享链接"
             self.detail_text = "请先解析分享链接并选择清晰度版本"
             return
+        self._clear_runtime_activity()
         self.status_text = "正在下载分享视频"
         self.detail_text = f"正在下载所选版本: {variant_id}"
         self._worker = Thread(target=self._run_share_variant_download, args=(variant_id,), daemon=True)
@@ -218,6 +223,11 @@ class MainController:
     def _platform_name(self) -> str:
         return {"douyin": "抖音", "bilibili": "Bilibili"}[self.platform_mode]
 
+    def _clear_runtime_activity(self) -> None:
+        clear_activity = getattr(self.engine, "clear_activity", None)
+        if clear_activity is not None:
+            clear_activity()
+
     def wait_for_sync(self, timeout: float | None = None) -> None:
         worker = self._worker
         if worker is None:
@@ -227,6 +237,32 @@ class MainController:
     def poll_runtime_state(self) -> None:
         worker = self._worker
         if worker is None or not worker.is_alive():
+            return
+        activity = getattr(self.engine, "last_activity", None)
+        if activity is not None:
+            operation = getattr(activity, "operation", "sync")
+            prefix = {
+                "preview": "正在生成预览",
+                "share_parse": "正在解析分享链接",
+                "share_download": "正在下载分享视频",
+                "sample": "正在下载样本",
+            }.get(operation, "同步进行中")
+            completed_count = getattr(activity, "completed_count", 0)
+            total_count = getattr(activity, "total_count", 0)
+            current_author_name = getattr(activity, "current_author_name", "")
+            current_title = getattr(activity, "current_title", None)
+            current_url = getattr(activity, "current_url", "")
+            current_item = current_title or current_url
+            with self._lock:
+                self.status_text = (
+                    f"{prefix}: {activity.stage}"
+                    + (f" ({completed_count}/{total_count})" if total_count else "")
+                )
+                self.detail_text = (
+                    f"{current_author_name} / {current_item}".strip(" / ")
+                    if current_item
+                    else "请保持 Chrome 和当前页面打开"
+                )
             return
         progress = getattr(self.engine, "last_progress", None)
         if progress is None:

@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from threading import Event
 
 from video2local.adapters.base import SourceDescriptor
-from video2local.domain import SyncProgress
+from video2local.domain import RuntimeActivity, SyncProgress
 from video2local.domain import SourceType
 from video2local.sync_engine import SyncSummary
 from video2local.ui.controller import MainController
@@ -280,6 +280,47 @@ def test_main_controller_polls_live_progress_while_running() -> None:
 
     assert controller.status_text == "同步进行中: 已处理 2/5，下载 1，跳过 1，失败 0"
     assert controller.detail_text == "进行中: 作者乙 / 直播中条目 (2/5)"
+
+
+def test_main_controller_prefers_runtime_activity_before_download_progress() -> None:
+    @dataclass
+    class AliveWorker:
+        def is_alive(self) -> bool:
+            return True
+
+    engine = FakeEngine()
+    engine.last_activity = RuntimeActivity(
+        operation="preview",
+        stage="正在通过 Kukutool 解析清晰度",
+        completed_count=2,
+        total_count=5,
+        current_url="https://www.douyin.com/video/735003",
+    )
+    controller = MainController(engine=engine)
+    controller._worker = AliveWorker()  # type: ignore[assignment]
+
+    controller.poll_runtime_state()
+
+    assert controller.status_text == "正在生成预览: 正在通过 Kukutool 解析清晰度 (2/5)"
+    assert controller.detail_text == "https://www.douyin.com/video/735003"
+
+
+def test_main_controller_clears_previous_runtime_activity_before_starting_sync() -> None:
+    class ActivityEngine(FakeEngine):
+        def __init__(self) -> None:
+            super().__init__()
+            self.clear_activity_called = False
+
+        def clear_activity(self) -> None:
+            self.clear_activity_called = True
+
+    engine = ActivityEngine()
+    controller = MainController(engine=engine)
+
+    controller.start_sync()
+    controller.wait_for_sync(timeout=1.0)
+
+    assert engine.clear_activity_called is True
 
 
 def test_main_controller_can_run_sample_download() -> None:

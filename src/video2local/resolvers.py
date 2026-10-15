@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import hashlib
+from typing import Callable
 from urllib.request import Request, urlopen
 
 from video2local.browser import DouyinPublicSession, DouyinSignedSession, KukutoolSession
@@ -146,20 +147,24 @@ class KukutoolResolver:
     def resolve_variants_only_many(
         self,
         share_urls: list[str],
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> dict[str, SharePayloadResolution | Exception]:
         results: dict[str, SharePayloadResolution | Exception] = {}
-        for share_url, payload in zip(
+        total = len(share_urls)
+        for completed, (share_url, payload) in enumerate(zip(
             share_urls,
             self.kukutool_session.parse_share_urls(
                 share_urls,
                 base_url=self.settings.share_resolvers.kukutool_base_url,
             ),
             strict=True,
-        ):
+        ), start=1):
             if isinstance(payload, Exception):
                 results[share_url] = payload
-                continue
-            results[share_url] = self._build_variants_only_resolution(share_url, payload)
+            else:
+                results[share_url] = self._build_variants_only_resolution(share_url, payload)
+            if progress_callback is not None:
+                progress_callback(completed, total, share_url)
         return results
 
     def _build_variants_only_resolution(self, share_url: str, kukutool_payload: dict) -> SharePayloadResolution:

@@ -220,6 +220,29 @@ def test_kukutool_variant_only_resolution_does_not_request_douyin_metadata(tmp_p
     assert result.payload["aweme_detail"]["video"]["video_fullinfo"][0]["type"] == "超高清"
 
 
+def test_kukutool_variant_only_many_reports_progress_for_each_url(tmp_path: Path) -> None:
+    settings = AppSettings.default_for_root(tmp_path)
+    resolver = KukutoolResolver(settings=settings, kukutool_session=KukutoolSession())
+    urls = [
+        "https://www.douyin.com/video/735001",
+        "https://www.douyin.com/video/735002",
+    ]
+    payloads = [
+        {"url": "https://cdn.example.com/first.mp4"},
+        {"url": "https://cdn.example.com/second.mp4"},
+    ]
+    progress: list[tuple[int, int, str]] = []
+
+    with patch("video2local.resolvers.KukutoolSession.parse_share_urls", return_value=payloads):
+        result = resolver.resolve_variants_only_many(
+            urls,
+            progress_callback=lambda completed, total, url: progress.append((completed, total, url)),
+        )
+
+    assert list(result) == urls
+    assert progress == [(1, 2, urls[0]), (2, 2, urls[1])]
+
+
 def test_kukutool_resolver_uses_placeholder_metadata_without_native_enrichment(tmp_path: Path) -> None:
     settings = AppSettings.default_for_root(tmp_path)
     resolver = KukutoolResolver(

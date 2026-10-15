@@ -47,6 +47,19 @@ class SyncProgress:
 
 
 @dataclass(frozen=True)
+class RuntimeActivity:
+    """A user-visible activity emitted before a sync item reaches the downloader."""
+
+    operation: str
+    stage: str
+    completed_count: int = 0
+    total_count: int = 0
+    current_url: str = ""
+    current_title: str | None = None
+    current_author_name: str = ""
+
+
+@dataclass(frozen=True)
 class SampleDownloadResult:
     metadata: VideoMetadata
     local_path: str
